@@ -240,6 +240,7 @@ button.row:active, a.row:active { background: var(--sep); }
 .t-trend i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
 .t-trend.ok { color: var(--green-text); }
 .t-trend.bad { color: var(--danger); }
+.t-trend.none { color: var(--text-2); }
 
 /* Flugfenster */
 .wincard { display: flex; gap: 14px; align-items: flex-start; }

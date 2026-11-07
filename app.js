@@ -27,11 +27,11 @@ const ICONS = {
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // ---------- Konstanten ----------
-const AWC = 'https://aviationweather.gov/api/data';      // METAR, TAF, Flugplätze (NOAA)
+const DATA = 'data/';  // METAR, TAF, Flugplätze – von GitHub alle 15 min neben die App gelegt (Quelle: aviationweather.gov, OurAirports)
 const OM = 'https://api.open-meteo.com/v1/forecast';     // Modellvorhersage (u. a. DWD ICON)
 const LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600]; // Druckflächen in hPa
 const H = 3600e3, SPAN = 48, FT = 3.28084;
-const DEFAULTS = { minCeil: 1500, minVis: 5, maxWind: 20, maxGust: 25, proxy: '' };
+const DEFAULTS = { minCeil: 1500, minVis: 5, maxWind: 20, maxGust: 25 };
 const settings = () => ({ ...DEFAULTS, ...store.get('settings', {}) });
 const AIRCRAFT = {
   C152: { name: 'Cessna C152', tas: 100, burn: 23, fuel: 'AvGas 100LL' },
@@ -98,23 +98,21 @@ function sunEvents(lat, lon, start) {
 
 // ---------- Netz ----------
 async function getJSON(url) {
-  const once = async (u) => {
-    const ctrl = new AbortController(); const tm = setTimeout(() => ctrl.abort(), 15000);
-    try {
-      const r = await fetch(u, { signal: ctrl.signal });
-      if (r.status === 204) return [];
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const txt = await r.text(); return txt.trim() ? JSON.parse(txt) : [];
-    } finally { clearTimeout(tm); }
-  };
-  try { return await once(url); }
-  catch (e) {
-    const p = settings().proxy.trim();
-    if (!p) throw new Error(e.name === 'AbortError' ? 'Zeitüberschreitung' : 'nicht erreichbar');
-    return once(p + encodeURIComponent(url));
-  }
+  const ctrl = new AbortController(); const tm = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal, cache: 'no-cache' });
+    if (r.status === 204) return [];
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const txt = await r.text(); return txt.trim() ? JSON.parse(txt) : [];
+  } catch (e) {
+    throw new Error(e.name === 'AbortError' ? 'Zeitüberschreitung' : e.message.startsWith('HTTP') ? e.message : 'nicht erreichbar');
+  } finally { clearTimeout(tm); }
 }
-
+// Wetter- und Platzdaten von der eigenen Adresse (keine Browser-Sperre)
+async function loadData() {
+  const [metar, taf, airports, status] = await Promise.all(['metar', 'taf', 'airports', 'status'].map((n) => getJSON(`${DATA}${n}.json`).catch(() => null)));
+  return { metar: metar || [], taf: taf || [], airports: airports || {}, status };
+}
 // ---------- Wetter auswerten ----------
 // Sicht: aviationweather.gov liefert Meilen, "6+" bedeutet 10 km oder mehr
 function parseVis(v) {
@@ -232,36 +230,28 @@ async function loadBriefing(ids) {
   store.set('currentIds', ids);
   loading = true; route();
   const errors = [];
-  const list = ids.join(',');
-  const [metars, tafs] = await Promise.all([
-    getJSON(`${AWC}/metar?ids=${list}&format=json&hours=3`).catch((e) => { errors.push('METAR: ' + e.message); return []; }),
-    getJSON(`${AWC}/taf?ids=${list}&format=json`).catch((e) => { errors.push('TAF: ' + e.message); return []; }),
-  ]);
+  const W = await loadData();
+  if (!W.status) errors.push('METAR/TAF nicht erreichbar (offline?) – es wird nur das Modell genutzt.');
+  else if (W.status.errors?.length) errors.push('Wetterquelle: ' + W.status.errors.join(' · '));
   const coords = store.get('coords', {});
-  const need = ids.filter((id) => !coords[id] && !latest(metars, id, 'obsTime') && !latest(tafs, id, 'issueTime'));
-  const info = need.length ? await getJSON(`${AWC}/airport?ids=${need.join(',')}&format=json`).catch(() => []) : [];
 
   const airports = await Promise.all(ids.map(async (id) => {
-    const m = latest(metars, id, 'obsTime'), t = latest(tafs, id, 'issueTime');
-    const a = Array.isArray(info) ? info.find((x) => x.icaoId === id) : null, c = coords[id];
-    const src = c || m || t || a;
-    if (!src || src.lat == null) return { id, name: id, error: 'Platz nicht gefunden. Koordinaten in den Einstellungen eintragen.' };
-    const ap = { id, name: c?.name || a?.name || m?.name || t?.name || id, lat: +src.lat, lon: +src.lon, metar: m || null, taf: t || null, tafUse: !!t, notes: [] };
+    const m = W.metar.find((x) => x.icaoId === id), t = W.taf.find((x) => x.icaoId === id);
+    const a = W.airports[id], c = coords[id];
+    const src = c || (a && { lat: a[1], lon: a[2] }) || m || t;
+    if (!src || src.lat == null) return { id, name: id, error: 'Platz nicht in der Datenbank. Koordinaten in den Einstellungen eintragen.' };
+    const ap = { id, name: c?.name || a?.[0] || id, lat: +src.lat, lon: +src.lon, elevFt: a?.[3] ?? null, metar: m || null, taf: t || null, tafUse: !!t, notes: [] };
 
-    // Kleiner Platz ohne eigenes Wetter: nächstgelegene Station suchen
-    if (!m || !t) {
-      const bb = [ap.lat - 0.6, ap.lon - 0.9, ap.lat + 0.6, ap.lon + 0.9].map((v) => v.toFixed(2)).join(',');
-      if (!m) {
-        const arr = await getJSON(`${AWC}/metar?bbox=${bb}&format=json&hours=2`).catch(() => []);
-        const n = nearest(Array.isArray(arr) ? arr : [], ap.lat, ap.lon, id);
-        if (n) { ap.metar = latest(arr, n.x.icaoId, 'obsTime'); ap.metarSrc = { id: n.x.icaoId, dist: Math.round(n.d) }; }
-      }
-      if (!t) {
-        const arr = await getJSON(`${AWC}/taf?bbox=${bb}&format=json`).catch(() => []);
-        const n = nearest(Array.isArray(arr) ? arr : [], ap.lat, ap.lon, id);
-        if (n) { ap.taf = n.x; ap.tafSrc = { id: n.x.icaoId, dist: Math.round(n.d) }; ap.tafUse = n.d <= 30; }
-      }
+    // Kleiner Platz ohne eigenes Wetter: nächstgelegene Station
+    if (!m) {
+      const n = nearest(W.metar, ap.lat, ap.lon, id);
+      if (n && n.d <= 60) { ap.metar = n.x; ap.metarSrc = { id: n.x.icaoId, dist: Math.round(n.d) }; }
     }
+    if (!t) {
+      const n = nearest(W.taf, ap.lat, ap.lon, id);
+      if (n && n.d <= 80) { ap.taf = n.x; ap.tafSrc = { id: n.x.icaoId, dist: Math.round(n.d) }; ap.tafUse = n.d <= 30; }
+    }
+    if (!ap.metar && !ap.taf && W.status) ap.notes.push('Kein METAR/TAF in der Nähe – Grafik nutzt das Modell.');
     // Modell für genau diesen Ort
     const vars = ['visibility', 'wind_speed_10m', 'wind_direction_10m', 'wind_gusts_10m', 'cloud_cover_low',
       ...LEVELS.flatMap((L) => [`cloud_cover_${L}hPa`, `geopotential_height_${L}hPa`]),
@@ -277,7 +267,7 @@ async function loadBriefing(ids) {
   const valid = airports.filter((a) => !a.error);
   let profile = null;
   if (valid.length > 1) profile = await loadProfile(valid, start).catch((e) => { errors.push('Streckenprofil: ' + e.message); return null; });
-  B = { fetchedAt: Date.now(), start, ids, airports, errors, demo: false, profile };
+  B = { fetchedAt: Date.now(), dataAt: W.status?.fetchedAt ? W.status.fetchedAt * 1000 : null, start, ids, airports, errors, demo: false, profile };
   store.set('briefing', B);
   loading = false; sel = 0;
   if (location.hash.startsWith('#briefing') || !location.hash) route(); else location.hash = '#briefing';
@@ -440,24 +430,27 @@ function tilesHTML(all, fp) {
   return `<div class="tiles">${all.map(({ ap, hours }) => {
     if (!hours) return `<div class="tile"><div class="t-top"><span class="t-id">${esc(ap.id)}</span></div><p class="warn">${esc(ap.error)}</p></div>`;
     const h0 = hours[ni];
-    const m = ap.metar && !ap.metarSrc && toMs(ap.metar.obsTime) > Date.now() - 2 * H ? ap.metar : null;
+    const near = ap.metarSrc && ap.metarSrc.dist <= 30;
+    const m = ap.metar && (!ap.metarSrc || near) && toMs(ap.metar.obsTime) > Date.now() - 2 * H ? ap.metar : null;
     const ceil = m ? ceilOf(m.clouds) : h0.ceil, vis = m ? parseVis(m.visib) : h0.vis;
-    const cat = category(ceil, vis), src = m ? 'METAR' : h0.src || '–';
+    const cat = m || h0.cat ? category(ceil, vis) : null, src = m ? (ap.metarSrc ? `METAR ${ap.metarSrc.id} (${ap.metarSrc.dist} km)` : 'METAR') : h0.src || 'keine Daten';
     const good = h0.status === 'ok';
     const nx = hours.find((h) => h.i > ni && (h.status === 'ok') !== good);
     const when = nx ? `${WD[new Date(nx.t).getUTCDay()]} ${p2(new Date(nx.t).getUTCHours())}Z` : '';
     const why = !good && h0.why?.length ? ` (${h0.why.join(', ')})` : !good && h0.status === 'tempo' ? ' (TEMPO)' : '';
-    const trend = good ? (nx ? `Über Minima bis ${when}` : 'Über Minima für 48 h') : (nx ? `Unter Minima${why} bis ${when}` : `Unter Minima${why} für 48 h`);
+    const nd = hours.find((h) => h.i > ni && h.status !== 'none');
+    const trend = h0.status === 'none' ? (nd ? `Vorhersage ab ${WD[new Date(nd.t).getUTCDay()]} ${p2(new Date(nd.t).getUTCHours())}Z` : 'Keine Vorhersage')
+      : good ? (nx ? `Über Minima bis ${when}` : 'Über Minima für 48 h') : (nx ? `Unter Minima${why} bis ${when}` : `Unter Minima${why} für 48 h`);
     const big = ceil == null ? '–' : ceil === Infinity ? 'frei' : Math.round(ceil / 100) * 100;
     return `<button class="tile" data-go="${esc(ap.id)}">
-      <div class="t-top"><span class="t-id">${esc(ap.id)}</span><span class="pill cat-${cat}">${cat}</span></div>
+      <div class="t-top"><span class="t-id">${esc(ap.id)}</span>${cat ? `<span class="pill cat-${cat}">${cat}</span>` : ''}</div>
       <div class="t-name">${esc(ap.name)}</div>
       <div class="t-big">${big}${typeof big === 'number' ? '<small> ft</small>' : ''}</div>
       <div class="t-sub">Ceiling jetzt · ${src}</div>
       <div class="t-meta">${fmtWind(m || h0.wind)} · ${fmtVis(vis)}</div>
-      <div class="t-trend ${good ? 'ok' : 'bad'}"><i></i>${trend}</div>
+      <div class="t-trend ${h0.status === 'none' ? 'none' : good ? 'ok' : 'bad'}"><i></i>${trend}</div>
       ${(() => { const e = fp?.eta[ap.id]; if (!e) return ''; const i = hourOf(e.t); const h = i == null ? null : hours[i];
-        const st = !h ? 'außerhalb 48 h' : h.status === 'ok' ? (h.day ? 'über Minima' : 'Nacht') : h.status === 'tempo' ? 'TEMPO unter Minima' : 'unter Minima';
+        const st = !h ? 'außerhalb 48 h' : h.status === 'none' ? 'keine Daten' : h.status === 'ok' ? (h.day ? 'über Minima' : 'Nacht') : h.status === 'tempo' ? 'TEMPO unter Minima' : 'unter Minima';
         return `<div class="t-eta ${h && h.status === 'ok' && h.day ? 'ok' : 'bad'}">${e.kind} ${hhmm(e.t)}Z · ${st}</div>`; })()}
     </button>`;
   }).join('')}</div>`;
@@ -802,12 +795,12 @@ function briefingView() {
   <div class="print-only print-head">
     <h1>Ceiling – Flugvorbereitung</h1>
     <p><b>${esc(routeTxt)}</b></p>
-    <p>Export: <span id="exportTime"></span> · Daten abgerufen: ${utc(B.fetchedAt)} · Minima: ${s.minCeil} ft / ${s.minVis} km / Wind ${s.maxWind} kt, Böen ${s.maxGust} kt</p>
+    <p>Export: <span id="exportTime"></span> · Daten abgerufen: ${utc(B.fetchedAt)}${B.dataAt ? ` (METAR/TAF-Stand ${hhmm(B.dataAt)}Z)` : ''} · Minima: ${s.minCeil} ft / ${s.minVis} km / Wind ${s.maxWind} kt, Böen ${s.maxGust} kt</p>
   </div>
-  <p class="meta noprint">${esc(routeTxt)} · abgerufen ${utc(B.fetchedAt)}</p>
+  <p class="meta noprint">${esc(routeTxt)} · abgerufen ${utc(B.fetchedAt)}${B.dataAt ? ` · METAR/TAF-Stand ${hhmm(B.dataAt)}Z` : ''}</p>
   ${B.demo ? '<p class="banner demo">Beispieldaten – kein echtes Wetter</p>' : ''}
   ${age > 60 ? `<p class="banner noprint">Daten sind ${age < 120 ? age + ' min' : Math.round(age / 60) + ' h'} alt – oben rechts aktualisieren.</p>` : ''}
-  ${B.errors?.length ? `<p class="banner">${B.errors.map(esc).join(' · ')}${s.proxy ? '' : ' – siehe Einstellungen › Proxy.'}</p>` : ''}
+  ${B.errors?.length ? `<p class="banner">${B.errors.map(esc).join(' · ')}</p>` : ''}
 
   <h2 class="sec">Jetzt</h2>
   ${tilesHTML(all, fp)}
@@ -853,7 +846,7 @@ function briefingView() {
   <h2 class="sec noprint">Plätze</h2>
   ${all.map(({ ap, hours }) => airportCard(ap, hours, s, fp)).join('')}
 
-  <p class="foot">Quellen: METAR/TAF aviationweather.gov (NOAA), Modell Open-Meteo (u. a. DWD ICON). Modell-Ceiling ist eine grobe Schätzung aus Bewölkung in Druckflächen.
+  <p class="foot">Quellen: METAR/TAF aviationweather.gov (NOAA), Flugplätze OurAirports, Modell und Gelände Open-Meteo (u. a. DWD ICON). Modell-Ceiling ist eine grobe Schätzung aus Bewölkung in Druckflächen.
   Keine amtliche Flugwetterberatung – vor dem Flug offizielle Quellen (DWD) prüfen. Kategorien: VFR &gt; 3000 ft und &gt; 8 km, MVFR ≤ 3000 ft / ≤ 8 km, IFR &lt; 1000 ft / &lt; 4,8 km, LIFR &lt; 500 ft / &lt; 1,6 km.</p>`;
   return html;
 }
@@ -1016,17 +1009,13 @@ const SECTIONS = [
       <li><button class="row" id="addc">Platz mit Koordinaten hinzufügen …</button></li></ul>
       <p class="group-note">Nur nötig, wenn ein kleiner Platz nicht gefunden wird (z. B. Ultraleicht- oder Segelfluggelände).</p>
 
-      <p class="group-label">Verbindung</p>
-      <ul class="group"><li><label class="row"><span>Proxy (optional)</span><input type="text" class="wide" data-k="proxy" value="${esc(s.proxy)}" placeholder="https://…?url=" autocapitalize="off" autocorrect="off" spellcheck="false"></label></li></ul>
-      <p class="group-note">Nur eintragen, wenn METAR/TAF als „nicht erreichbar" gemeldet werden. Die Adresse wird vor die Wetter-Adresse gesetzt.</p>
-
       <p class="group-label">Ausprobieren</p>
       <ul class="group"><li><button class="row" id="demo">Beispieldaten anzeigen</button></li></ul>
 
       <p class="group-label">Daten</p>
       <ul class="group"><li><button class="row danger" id="reset">Alle Daten löschen</button></li></ul>
       <p class="group-note">Routen, Minima und das letzte Briefing werden nur auf diesem Gerät gespeichert.<br>
-      Quellen: aviationweather.gov (METAR, TAF, Plätze), Open-Meteo (Modell). Keine amtliche Flugwetterberatung.</p>`;
+      Quellen: aviationweather.gov (METAR, TAF), OurAirports (Flugplätze), Open-Meteo (Modell, Gelände). METAR/TAF werden alle 15 Minuten aktualisiert. Keine amtliche Flugwetterberatung.</p>`;
     },
     mount: () => {
       document.querySelectorAll('[data-k]').forEach((inp) => inp.addEventListener('change', () => {

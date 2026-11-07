@@ -1,0 +1,50 @@
+name: Wetterdaten holen und App veröffentlichen
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '4,19,34,49 * * * *'   # alle 15 Minuten (GitHub startet teils verspätet)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Kalenderwoche (Flugplätze nur 1x pro Woche neu laden)
+        id: week
+        run: echo "w=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: .cache
+          key: ourairports-${{ steps.week.outputs.w }}
+      - name: App-Dateien zusammenstellen
+        run: |
+          mkdir -p site
+          cp index.html style.css app.js sw.js manifest.webmanifest icon-180.png icon-192.png icon-512.png .nojekyll site/
+      - name: METAR, TAF und Flugplätze holen
+        run: python3 tools/fetch_data.py site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
