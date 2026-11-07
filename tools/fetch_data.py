@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 OUT = os.path.join(sys.argv[1] if len(sys.argv) > 1 else "site", "data")
 CACHE = ".cache"
-LIVE = "https://peetziboy.github.io/ceiling/data/"  # vorherige Daten, falls ein Abruf scheitert
+LIVE = "https://peetziboy.github.io/Ceiling/data/"  # vorherige Daten, falls ein Abruf scheitert
 UA = {"User-Agent": "ceiling-webapp/1.0 (github.com/peetziboy/ceiling)"}
 # Europa grob: Breite 34..72, Länge -25..45
 BOX = (34.0, 72.0, -25.0, 45.0)
