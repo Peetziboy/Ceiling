@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Ceiling</title>
+  <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Ceiling">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="layout">
+    <!-- Menü: Seitenleiste (quer) bzw. Tab-Leiste (hoch), per CSS umgeschaltet -->
+    <nav class="nav" aria-label="Hauptmenü">
+      <h1 class="nav-title">Ceiling</h1>
+      <ul class="nav-list" id="nav"></ul>
+    </nav>
+
+    <main class="content">
+      <header class="bar">
+        <button class="back" id="back" hidden>‹ Zurück</button>
+        <span class="bar-title" id="barTitle"></span>
+        <div class="bar-actions" id="barActions"></div>
+      </header>
+      <div class="scroll" id="scroll">
+        <h2 class="large-title" id="largeTitle"></h2>
+        <div id="view"></div>
+      </div>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
