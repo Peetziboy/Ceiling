@@ -149,7 +149,11 @@ function tafAt(taf, t) {
     if (ch === 'TEMPO' || ch.startsWith('PROB') || f.probability) { if (a <= t && t < b) temps.push(f); continue; }
     if (!base) { base = norm(f); continue; }
     if (a > t) continue;
-    base = ch === 'BECMG' ? merge(base, f) : norm(f);
+    if (ch === 'BECMG') {
+      const m = merge(base, f), end = toMs(f.timeBec) ?? a + 2 * H;
+      // Übergangszeit: Verschlechterung gilt sofort, Verbesserung erst am Ende
+      base = t < end ? { ...m, ceil: Math.min(base.ceil, m.ceil), vis: Math.min(base.vis, m.vis), wspd: Math.max(base.wspd ?? 0, m.wspd ?? 0), wgst: Math.max(base.wgst ?? 0, m.wgst ?? 0) || null } : m;
+    } else base = norm(f);
   }
   if (!base) return null;
   let tempo = null;
@@ -369,7 +373,7 @@ function chartSVG(ap, hours, s, eta) {
   // Wind alle 3 Stunden: Pfeil (wohin der Wind weht) und Stärke
   hours.filter((h) => h.i % 3 === 1 && h.wind?.wspd != null).forEach((h) => {
     const w = h.wind, cx = x(h.i + 0.5), bad = w.wspd > s.maxWind || (w.wgst || 0) > s.maxGust;
-    if (typeof w.wdir === 'number' && w.wspd >= 1) g += `<g transform="translate(${cx},${wY - 6}) rotate(${w.wdir + 180})"><path class="ch-arrow${bad ? ' bad' : ''}" d="M0,-7L0,7M-4.5,2.5L0,7L4.5,2.5"/></g>`;
+    if (typeof w.wdir === 'number' && w.wspd >= 1) g += `<g transform="translate(${cx},${wY - 6}) rotate(${w.wdir})"><path class="ch-arrow${bad ? ' bad' : ''}" d="M0,-7L0,7M-4.5,2.5L0,7L4.5,2.5"/></g>`;
     g += `<text class="ch-wind${bad ? ' bad' : ''}" x="${cx}" y="${wY + 16}" text-anchor="middle">${Math.round(w.wspd)}${w.wgst && w.wgst > w.wspd + 4 ? '<tspan class="g">G' + Math.round(w.wgst) + '</tspan>' : ''}</text>`;
   });
   g += `<text class="ch-label" x="${L - 8}" y="${wY + 16}" text-anchor="end">kt</text>`;
@@ -433,9 +437,9 @@ function tilesHTML(all, fp) {
     const near = ap.metarSrc && ap.metarSrc.dist <= 30;
     const m = ap.metar && (!ap.metarSrc || near) && toMs(ap.metar.obsTime) > Date.now() - 2 * H ? ap.metar : null;
     const ceil = m ? ceilOf(m.clouds) : h0.ceil, vis = m ? parseVis(m.visib) : h0.vis;
-    const cat = m || h0.cat ? category(ceil, vis) : null, src = m ? (ap.metarSrc ? `METAR ${ap.metarSrc.id} (${ap.metarSrc.dist} km)` : 'METAR') : h0.src || 'keine Daten';
+    const cat = m || h0.cat ? category(ceil, vis) : null, src = m ? (ap.metarSrc ? `METAR ${ap.metarSrc.id} ${hhmm(toMs(m.obsTime))}Z (${ap.metarSrc.dist} km)` : `METAR ${hhmm(toMs(m.obsTime))}Z`) : h0.src || 'keine Daten';
     const good = h0.status === 'ok';
-    const nx = hours.find((h) => h.i > ni && (h.status === 'ok') !== good);
+    const nx = hours.find((h) => h.i > ni && (h.status === 'ok') !== good && hours[h.i + 1] && (hours[h.i + 1].status === 'ok') !== good);
     const when = nx ? `${WD[new Date(nx.t).getUTCDay()]} ${p2(new Date(nx.t).getUTCHours())}Z` : '';
     const why = !good && h0.why?.length ? ` (${h0.why.join(', ')})` : !good && h0.status === 'tempo' ? ' (TEMPO)' : '';
     const nd = hours.find((h) => h.i > ni && h.status !== 'none');
@@ -451,7 +455,7 @@ function tilesHTML(all, fp) {
       <div class="t-trend ${h0.status === 'none' ? 'none' : good ? 'ok' : 'bad'}"><i></i>${trend}</div>
       ${(() => { const e = fp?.eta[ap.id]; if (!e) return ''; const i = hourOf(e.t); const h = i == null ? null : hours[i];
         const st = !h ? 'außerhalb 48 h' : h.status === 'none' ? 'keine Daten' : h.status === 'ok' ? (h.day ? 'über Minima' : 'Nacht') : h.status === 'tempo' ? 'TEMPO unter Minima' : 'unter Minima';
-        return `<div class="t-eta ${h && h.status === 'ok' && h.day ? 'ok' : 'bad'}">${e.kind} ${hhmm(e.t)}Z · ${st}</div>`; })()}
+        return `<div class="t-eta ${h && h.status === 'ok' && h.day ? 'ok' : 'bad'}">${e.kind} ${hhmm(e.t)}Z · ${st}${h?.src ? ` (${h.src})` : ''}</div>`; })()}
     </button>`;
   }).join('')}</div>`;
 }
@@ -547,7 +551,7 @@ function flightPlan(dep, p) {
     const wca = Math.asin(Math.max(-1, Math.min(1, xw / p.tas)));
     const gs = Math.max(30, p.tas * Math.cos(wca) - hw);
     const min = (dist / gs) * 60 + p.allow;
-    legs.push({ from: a.id, to: b.id, dist, tc, wind, hw, gs, wca: wca / RAD, min, fuel: (min / 60) * p.burn, dep: t, arr: t + min * 6e4 });
+    legs.push({ from: a.id, to: b.id, dist, tc, var: 1.6 + 0.25 * ((a.lon + b.lon) / 2), wind, hw, gs, wca: wca / RAD, min, fuel: (min / 60) * p.burn, dep: t, arr: t + min * 6e4 });
     t += min * 6e4 + (k < aps.length - 2 ? p.stop * 6e4 : 0);
   }
   const eta = {}; if (aps[0]) eta[aps[0].id] = { t: dep, kind: 'Abflug' };
@@ -669,8 +673,8 @@ function profileSVG(fp, s, p) {
 function planDetailsHTML(fp, p) {
   if (!fp.legs.length) return '<p class="group-note">Für Etappen mindestens zwei Plätze im Briefing laden.</p>';
   return `<div class="tbl-wrap"><table class="tbl">
-    <thead><tr><th>Etappe</th><th>Distanz</th><th>rwK</th><th>Wind</th><th>GS</th><th>Zeit</th><th>Abflug → Ankunft</th><th>Kraftstoff</th></tr></thead>
-    <tbody>${fp.legs.map((l) => `<tr><td><b>${esc(l.from)} → ${esc(l.to)}</b></td><td>${Math.round(l.dist)} NM</td><td>${p2(Math.round(l.tc)).padStart(3, '0')}°</td>
+    <thead><tr><th>Etappe</th><th>Distanz</th><th>rwK / mwK</th><th>Wind</th><th>GS</th><th>Zeit</th><th>Abflug → Ankunft</th><th>Kraftstoff</th></tr></thead>
+    <tbody>${fp.legs.map((l) => `<tr><td><b>${esc(l.from)} → ${esc(l.to)}</b></td><td>${Math.round(l.dist)} NM</td><td>${p2(Math.round(l.tc)).padStart(3, '0')}° / ${p2(Math.round((l.tc - l.var + 360) % 360)).padStart(3, '0')}°</td>
       <td>${l.wind ? `${p2(Math.round(l.wind.wd / 10) * 10).padStart(3, '0')}°/${Math.round(l.wind.ws)} kt <span class="detail">${l.hw >= 0 ? 'Gegen' : 'Rücken'} ${Math.abs(Math.round(l.hw))}</span>` : '–'}</td>
       <td>${Math.round(l.gs)} kt</td><td>${fmtDur(l.min)}</td><td>${hhmm(l.dep)}Z → ${hhmm(l.arr)}Z</td><td>${Math.round(l.fuel)} l</td></tr>`).join('')}
     </tbody></table></div>
@@ -726,7 +730,7 @@ function flugView() {
     ${num('reserve', 'Reserve', 'min', p.reserve, 5)}
     ${num('taxi', 'Rollen je Start', 'l', p.taxi)}
   </ul>
-  <p class="group-note">Zuschlag: Steigflug, Abflug- und Anflugverfahren. Aufenthalt 0 = Plätze werden nur überflogen.</p>
+  <p class="group-note">Zuschlag: Steigflug, Abflug- und Anflugverfahren. Aufenthalt 0 = Plätze werden nur überflogen. mwK mit genäherter Missweisung (ca. 3–5° Ost in Deutschland) – vor dem Flug mit der Karte abgleichen.</p>
 
   <p class="group-label">Etappen${B ? ' · ' + esc(B.ids.join(' → ')) : ''}</p>
   <div class="card">${fp ? planDetailsHTML(fp, p) : '<p class="group-note">Zuerst im Briefing eine Route laden.</p>'}</div>
@@ -799,6 +803,7 @@ function briefingView() {
   </div>
   <p class="meta noprint">${esc(routeTxt)} · abgerufen ${utc(B.fetchedAt)}${B.dataAt ? ` · METAR/TAF-Stand ${hhmm(B.dataAt)}Z` : ''}</p>
   ${B.demo ? '<p class="banner demo">Beispieldaten – kein echtes Wetter</p>' : ''}
+  ${B.dataAt && B.fetchedAt - B.dataAt > 45 * 6e4 ? `<p class="banner">METAR/TAF-Stand ${hhmm(B.dataAt)}Z ist ${Math.round((B.fetchedAt - B.dataAt) / 6e4)} min alt – GitHub hat die Aktualisierung verzögert. Aktuelles METAR/TAF vor dem Flug zusätzlich prüfen.</p>` : ''}
   ${age > 60 ? `<p class="banner noprint">Daten sind ${age < 120 ? age + ' min' : Math.round(age / 60) + ' h'} alt – oben rechts aktualisieren.</p>` : ''}
   ${B.errors?.length ? `<p class="banner">${B.errors.map(esc).join(' · ')}</p>` : ''}
 
