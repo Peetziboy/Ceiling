@@ -133,6 +133,64 @@ function ceilOf(clouds) {
 const wx = (f) => ({ wdir: f.wdir, wspd: f.wspd, wgst: f.wgst });
 
 // TAF zum Zeitpunkt t: vorherrschender Zustand + TEMPO/PROB (vorübergehend schlechter)
+// TAF aus dem Original-Text lesen (unabhängig davon, wie die Quelle die Gruppen aufbereitet)
+function parseRawTAF(taf) {
+  const raw = taf?.rawTAF; if (!raw) return null;
+  const ref = toMs(taf.validTimeFrom) || toMs(taf.issueTime) || Date.now();
+  const R = new Date(ref);
+  const at = (dd, hh, mm = 0) => {
+    let t = Date.UTC(R.getUTCFullYear(), R.getUTCMonth(), +dd, +hh, +mm);
+    if (t < ref - 15 * 864e5) t = Date.UTC(R.getUTCFullYear(), R.getUTCMonth() + 1, +dd, +hh, +mm);
+    if (t > ref + 15 * 864e5) t = Date.UTC(R.getUTCFullYear(), R.getUTCMonth() - 1, +dd, +hh, +mm);
+    return t;
+  };
+  const period = (s) => { const m = /^(\d{2})(\d{2})\/(\d{2})(\d{2})$/.exec(s || ''); return m ? [at(m[1], m[2]), at(m[3], m[4])] : null; };
+  const toks = raw.replace(/=/g, ' ').trim().split(/\s+/);
+  let i = 0;
+  while (i < toks.length && /^(TAF|AMD|COR|RTD)$/.test(toks[i])) i++;
+  i++; // Kennung
+  if (/^\d{6}Z$/.test(toks[i])) i++;
+  const valid = period(toks[i]); if (!valid) return null; i++;
+  const groups = []; let g = { fcstChange: null, timeFrom: valid[0], timeTo: valid[1], clouds: [], wx: [] };
+  groups.push(g);
+  const start = (ch, a, b, prob) => { g = { fcstChange: ch, timeFrom: a, timeTo: b, timeBec: ch === 'BECMG' ? b : null, probability: prob || null, clouds: [], wx: [] }; groups.push(g); };
+  for (; i < toks.length; i++) {
+    const t = toks[i]; let m;
+    if ((m = /^FM(\d{2})(\d{2})(\d{2})$/.exec(t))) { start('FM', at(m[1], m[2], m[3]), valid[1]); continue; }
+    if (t === 'BECMG' || t === 'TEMPO') { const p = period(toks[i + 1]); if (p) { start(t, p[0], p[1]); i++; } continue; }
+    if ((m = /^PROB(\d{2})$/.exec(t))) {
+      let ch = 'PROB', k = i + 1; if (toks[k] === 'TEMPO') { ch = 'TEMPO'; k++; }
+      const p = period(toks[k]); if (p) { start(ch, p[0], p[1], +m[1]); i = k; } continue;
+    }
+    if ((m = /^(\d{3}|VRB)(\d{2,3})(?:G(\d{2,3}))?(KT|MPS)$/.exec(t))) {
+      const f = m[4] === 'MPS' ? 1.944 : 1;
+      g.wdir = m[1] === 'VRB' ? 'VRB' : +m[1]; g.wspd = Math.round(+m[2] * f); g.wgst = m[3] ? Math.round(+m[3] * f) : null; continue;
+    }
+    if (t === 'CAVOK') { g.visib = '6+'; g.clouds = [{ cover: 'CAVOK', base: null }]; continue; }
+    if (/^\d{4}$/.test(t) && !g.visib) { g.visib = t === '9999' ? '6+' : +t; continue; }
+    if ((m = /^P?(\d+)SM$/.exec(t))) { g.visib = t.startsWith('P') ? '6+' : +m[1]; continue; }
+    if ((m = /^(FEW|SCT|BKN|OVC)(\d{3})(CB|TCU)?$/.exec(t))) { g.clouds.push({ cover: m[1], base: +m[2] * 100, type: m[3] || null }); continue; }
+    if ((m = /^VV(\d{3})$/.exec(t))) { g.clouds.push({ cover: 'VV', base: +m[1] * 100 }); continue; }
+    if (/^(NSC|SKC|NCD|CLR)$/.test(t)) { g.clouds = [{ cover: t, base: null }]; continue; }
+    if (t === 'NSW') { g.wx.push('NSW'); continue; }
+    if (/^[-+]?(VC)?(MI|BC|PR|DR|BL|SH|TS|FZ)?(DZ|RA|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|DU|SA|HZ|PO|SQ|FC|SS|DS)*$/.test(t) && /[A-Z]{2}/.test(t)) { g.wx.push(t); continue; }
+  }
+  // Gruppen ohne Wolkenangabe: „keine Angabe" (nicht „keine Wolken")
+  groups.forEach((x) => { x.wxString = x.wx.join(' '); delete x.wx; if (!x.clouds.length) x.clouds = undefined; });
+  if (!groups[0].clouds) groups[0].clouds = [];
+  // FM beendet die vorherige Grundgruppe
+  for (let k = 1; k < groups.length; k++) if (groups[k].fcstChange === 'FM') {
+    for (let j = k - 1; j >= 0; j--) if (!groups[j].fcstChange || groups[j].fcstChange === 'FM') { groups[j].timeTo = groups[k].timeFrom; break; }
+  }
+  return { ...taf, validTimeFrom: valid[0], validTimeTo: valid[1], fcsts: groups, parsed: true };
+}
+const tafCache = new WeakMap();
+function tafModel(taf) {
+  if (!taf) return null;
+  if (!tafCache.has(taf)) { let p = null; try { p = parseRawTAF(taf); } catch { p = null; } tafCache.set(taf, p && p.fcsts.length ? p : taf); }
+  return tafCache.get(taf);
+}
+
 function tafAt(taf, t) {
   if (!taf?.fcsts?.length) return null;
   const from = toMs(taf.validTimeFrom), to = toMs(taf.validTimeTo);
@@ -196,7 +254,7 @@ function computeHours(ap, start, s) {
   const out = [];
   for (let i = 0; i < SPAN; i++) {
     const t = start + i * H, tm = t + H / 2;
-    const taf = ap.taf && ap.tafUse ? tafAt(ap.taf, tm) : null;
+    const taf = ap.taf && ap.tafUse ? tafAt(tafModel(ap.taf), tm) : null;
     const mi = idx.get(t);
     const hr = ap.model;
     const mdl = mi == null ? null : {
@@ -213,7 +271,7 @@ function computeHours(ap, start, s) {
     h.why = [(h.ceil ?? Infinity) < s.minCeil && 'Wolken', (h.vis ?? 10) < s.minVis && 'Sicht', windBad && 'Wind'].filter(Boolean);
     if (!best) h.status = 'none';
     else if (h.why.length) h.status = 'below';
-    else if (taf?.tempo && ((taf.tempo.ceil ?? Infinity) < s.minCeil || (taf.tempo.vis ?? 10) < s.minVis)) h.status = 'tempo';
+    else if (taf?.tempo && ((taf.tempo.ceil ?? Infinity) < s.minCeil || (taf.tempo.vis ?? 10) < s.minVis || (taf.tempo.wgst ?? 0) > s.maxGust)) h.status = 'tempo';
     else h.status = 'ok';
     h.day = alt >= -6; // VFR-Tag: bis Ende der bürgerlichen Dämmerung
     out.push(h);
@@ -383,7 +441,7 @@ function chartSVG(ap, hours, s, eta) {
     });
     return d ? `<path class="${cls}" d="${d}"/>` : '';
   };
-  g += step((h) => h.taf?.tempo?.ceil, 'ch-tempo');
+  g += step((h) => { const c = h.taf?.tempo?.ceil; return c != null && isFinite(c) && c < (h.taf.ceil ?? Infinity) ? c : null; }, 'ch-tempo');
   g += step((h) => h.taf?.ceil, 'ch-taf');
   // Minimum mit Beschriftung als Kapsel
   const my = y(s.minCeil), lw = 118;
@@ -769,6 +827,7 @@ function condWords(f) {
 }
 const dh = (ms) => `${WD[new Date(ms).getUTCDay()]} ${p2(new Date(ms).getUTCHours())}${new Date(ms).getUTCMinutes() ? ':' + p2(new Date(ms).getUTCMinutes()) : ''}Z`;
 function tafWordsHTML(taf) {
+  taf = tafModel(taf);
   if (!taf?.fcsts?.length) return '<p class="detail">Kein TAF verfügbar.</p>';
   return `<ul class="words">${taf.fcsts.map((f, k) => {
     const ch = String(f.fcstChange || '').toUpperCase(), a = toMs(f.timeFrom), b = toMs(f.timeTo), e = toMs(f.timeBec);
