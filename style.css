@@ -470,6 +470,45 @@ input[type="range"]::-moz-range-thumb { width: 28px; height: 28px; border: 0; bo
 .w-lab { color: var(--text-2); font-weight: 600; font-size: 14px; }
 @media (max-width: 600px) { .words li { grid-template-columns: 1fr; } .al-row { grid-template-columns: 60px 18px 1fr; } .al-leg { margin-left: 90px; } }
 
+
+/* ---------- FlightPrep-Module ---------- */
+.modules .mod { gap: 14px; min-height: 64px; text-decoration: none; }
+.mod-n { width: 34px; height: 34px; border-radius: 50%; flex: none; display: inline-flex; align-items: center; justify-content: center;
+  background: var(--fill); color: var(--text-2); font-weight: 700; }
+.mod-n.ok { background: var(--green-soft); color: var(--green-text); }
+.mod-n.warn { background: var(--orange-soft); color: var(--orange); }
+.mod-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.mod-main b { font-size: 17px; }
+.mod-main span { font-size: 14px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.group.inner { background: var(--fill-soft); margin: 10px 0; border-radius: 12px; }
+.row.col { flex-direction: column; align-items: stretch; gap: 6px; }
+textarea { width: 100%; border: 0; border-radius: 10px; background: var(--fill-soft); padding: 10px 12px; color: var(--text); resize: vertical; font: inherit; font-size: max(16px, 1em); }
+.card textarea { background: var(--fill-soft); }
+.btn-tinted.small { min-height: 40px; font-size: 15px; padding: 0 16px; }
+.upload { margin-top: 8px; cursor: pointer; }
+.apinfo + .apinfo, .apbrief + .apbrief { margin-top: 14px; }
+.apinfo .ap-head { align-items: center; }
+.group-label.tight { margin: 14px 0 6px; }
+.row input[type="time"] { min-width: 96px; }
+.files { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 8px; }
+.files:empty { display: none; }
+.file { margin: 0; background: var(--fill-soft); border-radius: 12px; overflow: hidden; }
+.file img { display: block; width: 100%; height: auto; max-height: 320px; object-fit: contain; background: #fff; }
+.file figcaption { font-size: 12px; color: var(--text-2); padding: 6px 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.file-doc { display: block; padding: 18px 12px; color: var(--accent); text-decoration: none; font-weight: 600; word-break: break-word; }
+.warn-pill { background: var(--orange); color: #fff; font-size: 11px; min-width: 0; }
+.ok-text { color: var(--green-text); font-weight: 600; }
+.tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl tr.sum td { border-top: 1.5px solid var(--text-3); }
+.tbl.fuel td:first-child { width: 40%; }
+.wb-chart { max-width: 680px; margin: 16px auto 0; }
+.wb-env { fill: var(--green-soft); stroke: var(--vfr); stroke-width: 2; }
+.wb-pt.ok { fill: var(--accent); stroke: var(--card); stroke-width: 3; }
+.wb-pt.bad { fill: var(--danger); stroke: var(--card); stroke-width: 3; }
+.wb-pt.ld { opacity: .75; }
+.wb-line { stroke: var(--text-2); stroke-width: 2; stroke-dasharray: 5 4; }
+.back { text-decoration: none; }
+
 .print-only { display: none; }
 
 /* ---------- PDF / Drucken ---------- */
@@ -504,6 +543,11 @@ input[type="range"]::-moz-range-thumb { width: 28px; height: 28px; border: 0; bo
   .raw { margin-top: 6px; gap: 6px; }
   .raw small, .raw-label { font-size: 9.5px; }
   .ch-sel { display: none; }
+  .file { break-inside: avoid; }
+  .files { grid-template-columns: 1fr 1fr; }
+  .file img { max-height: 120mm; }
+  .apbrief, .modules { break-inside: avoid; }
+  .modules .mod { min-height: 0; padding: 4px 12px; }
   .along { border: 0.5px solid #d0d0d5; padding: 4px 12px; break-inside: avoid; }
   .al-row { padding: 6px 0; }
   .al-time b, .al-head b { font-size: 13px; }

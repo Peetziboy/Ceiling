@@ -1,5 +1,5 @@
 // =====================================================================
-// Ceiling – Wolkenuntergrenze über 48 h für Flugplätze und Routen
+// FlightPrep – Flugvorbereitung (Modul Wetter: Ceiling)
 // Keine amtliche Flugwetterberatung.
 // =====================================================================
 
@@ -42,7 +42,7 @@ const AIRCRAFT = {
   TB20: { name: 'Socata TB-20 Trinidad', tas: 150, burn: 45, fuel: 'AvGas 100LL' },
   DA40: { name: 'Diamond DA40 NG', tas: 130, burn: 23, fuel: 'Jet A-1 (Diesel)' },
 };
-const PLAN_DEFAULTS = { ac: 'C172', alt: 3500, depDay: 0, depTime: '', allow: 8, stop: 0, reserve: 30, taxi: 3, useWind: true, custom: {} };
+const PLAN_DEFAULTS = { ac: 'C172', corridor: 10, alt: 3500, depDay: 0, depTime: '', allow: 8, stop: 0, reserve: 30, taxi: 3, useWind: true, custom: {} };
 const plan = () => {
   const p = { ...PLAN_DEFAULTS, ...store.get('plan', {}) };
   const a = AIRCRAFT[p.ac] || AIRCRAFT.C172, c = (p.custom || {})[p.ac] || {};
@@ -698,13 +698,14 @@ function terrainAt(d) {
 function depWindows(all, p, s) {
   const res = []; let a = null;
   const byId = Object.fromEntries(all.map((x) => [x.ap.id, x.hours]));
+  const apById = Object.fromEntries(all.map((x) => [x.ap.id, x.ap]));
   const mm = p.depTime ? +p.depTime.split(':')[1] || 0 : 0;
   for (let d = 0; d <= SPAN; d++) {
     let ok = false;
     const dep = B.start + d * H + mm * 6e4;
     if (d < SPAN && dep >= Date.now() - H) {
       const fp = flightPlan(dep, p);
-      ok = Object.entries(fp.eta).filter(([, e]) => e.kind !== 'Ausweich').every(([id, e]) => { const i = hourOf(e.t), hs = byId[id]; return i != null && hs && hs[i].status === 'ok' && hs[i].day; });
+      ok = Object.entries(fp.eta).filter(([, e]) => e.kind !== 'Ausweich').every(([id, e]) => { const i = hourOf(e.t), hs = byId[id]; return i != null && hs && hs[i].status === 'ok' && hs[i].day && (typeof isOpen !== 'function' || isOpen(apById[id], e.t) !== false); });
       if (ok && B.profile) { const pc = profileCheck(fp, { ...s, alt: p.alt }); ok = !pc?.bad; }
     }
     if (ok && a == null) a = dep;
@@ -861,9 +862,9 @@ function evalAt(ap, hours, t, s) {
   const src = h.src === 'TAF' ? `TAF ${ap.tafSrc ? `${ap.tafSrc.id} (${ap.tafSrc.dist} km)` : ap.id}` : 'Modellvorhersage';
   return { src, ceil: h.ceil, vis: h.vis, wind: h.wind, wxs: h.taf?.wx || '', tempo: h.taf?.tempo || null, why: h.why, day, cat: h.cat, status: h.status };
 }
-const statusText = (e) => e.status === 'none' ? 'keine Daten' : !e.day && e.status === 'ok' ? 'Nacht' :
+const statusText = (e) => e.closed ? 'geschlossen' : e.status === 'none' ? 'keine Daten' : !e.day && e.status === 'ok' ? 'Nacht' :
   e.status === 'ok' ? 'über Minima' : e.status === 'tempo' ? 'TEMPO unter Minima' : `unter Minima${e.why?.length ? ' (' + e.why.join(', ') + ')' : ''}`;
-const statusCls = (e) => e.status === 'ok' && e.day ? 'ok' : e.status === 'none' ? 'none' : e.status === 'tempo' && e.day ? 'warn' : 'bad';
+const statusCls = (e) => e.closed ? 'bad' : e.status === 'ok' && e.day ? 'ok' : e.status === 'none' ? 'none' : e.status === 'tempo' && e.day ? 'warn' : 'bad';
 
 // Chronologische Liste: Abflug, Zwischenplätze, Ziel, Ausweichplatz
 function alongHTML(all, fp, s, compact) {
@@ -878,6 +879,9 @@ function alongHTML(all, fp, s, compact) {
     const leg = l ? `<div class="al-leg">${Math.round(l.dist)} NM · ${fmtDur(l.min)} · GS ${Math.round(l.gs)} kt${ap.isAlt ? ' · ab Ziel' : ''}</div>` : '';
     if (ap.error || !hours || !e) return `${leg}<div class="al-row al-bad"><div class="al-time"><b>–</b></div><div class="al-dot"></div><div class="al-main"><div class="al-head"><b>${esc(id)}</b></div><div class="warn">${esc(ap.error || 'Keine Zeit berechnet')}</div></div></div>`;
     const v = evalAt(ap, hours, e.t, s);
+    const open = typeof isOpen === 'function' ? isOpen(ap, e.t) : null, info = typeof apInfo === 'function' ? apInfo(id) : null;
+    if (open === false) { v.closed = true; }
+    const opl = info ? `<div class="al-src">Öffnungszeit: ${esc(hoursText(id))}${open === false ? ' – <b class="bad">zu dieser Zeit geschlossen</b>' : open === null ? ' – nicht geprüft' : ''}${info.ppr ? ' · <b>PPR</b>' : ''}</div>` : '';
     const wxl = v.status === 'none' ? '' : [`Wolken ${v.ceil === Infinity ? 'keine Untergrenze' : fmtCeil(v.ceil)}`, `Sicht ${fmtVis(v.vis)}`, v.wind ? `Wind ${fmtWind(v.wind)}` : '', v.wxs ? wxWords(v.wxs) : ''].filter(Boolean).join(' · ');
     return `${leg}<div class="al-row al-${statusCls(v)}${ap.isAlt ? ' alt' : ''}">
       <div class="al-time"><b>${hhmm(e.t)}Z</b><span>${e.kind}</span></div>
@@ -886,7 +890,7 @@ function alongHTML(all, fp, s, compact) {
         <div class="al-head"><b>${esc(id)}</b> <span class="al-name">${esc(ap.name)}</span>${v.cat ? ` <span class="pill cat-${v.cat}">${v.cat}</span>` : ''}<span class="status ${statusCls(v)}">${statusText(v)}</span></div>
         ${wxl ? `<div class="al-wx">${wxl}</div>` : ''}
         ${v.tempo ? `<div class="al-tempo">Zeitweise (TEMPO): Wolken ${fmtCeil(v.tempo.ceil)} · Sicht ${fmtVis(v.tempo.vis)}${v.tempo.wx ? ' · ' + wxWords(v.tempo.wx) : ''}</div>` : ''}
-        ${compact ? '' : `<div class="al-src">Quelle: ${esc(v.src)}</div>`}
+        ${compact ? '' : `<div class="al-src">Quelle: ${esc(v.src)}</div>`}${opl}
       </div>
     </div>`;
   }).join('')}</div>`;
@@ -975,78 +979,6 @@ function wetterMount() {
 const FLIGHT_DEFAULT = { from: '', via: [], to: '', alt: '' };
 const flightIn = () => ({ ...FLIGHT_DEFAULT, ...store.get('flight', {}) });
 const flightIds = (f) => [f.from, ...f.via, f.to].map((x) => (x || '').trim().toUpperCase()).filter((x) => /^[A-Z0-9]{4}$/.test(x));
-const STEPS = ['Route', 'Flugzeug & Zeit', 'Briefing'];
-const stepsNav = (cur) => `<nav class="steps noprint" aria-label="Schritte">${STEPS.map((t, k) => {
-  const n = k + 1, cls = n === cur ? 'cur' : n < cur ? 'done' : '';
-  const can = n <= cur || (n > cur && F && !loading);
-  return `${k ? '<i></i>' : ''}<a class="step ${cls}" ${can ? `href="#flug/${n}"` : 'aria-disabled="true"'}><span>${n < cur ? '✓' : n}</span>${t}</a>`;
-}).join('')}</nav>`;
-
-function step1View() {
-  const f = flightIn(), routes = store.get('routes', []);
-  const row = (key, label, val, k, removable) => `<li><div class="row route-row">
-      <span class="rr-label">${label}</span>
-      <input type="text" class="icao" maxlength="4" data-f="${key}"${k != null ? ` data-i="${k}"` : ''} value="${esc(val)}" placeholder="ICAO" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false">
-      ${removable ? `<button class="btn-text danger-text" data-rm="${k}" aria-label="Entfernen">Entfernen</button>` : ''}
-    </div><div class="rr-info" data-info="${key}${k != null ? '-' + k : ''}"></div></li>`;
-  return `${stepsNav(1)}
-  ${routes.length ? `<p class="group-label">Gespeicherte Routen</p>
-  <ul class="group">${routes.map((r, i) => `<li><div class="row"><button class="row-btn" data-r="${i}"><span>${esc(r.name)}</span><span class="detail">${esc(r.ids.join(' → '))}${r.alt ? ' · Ausweich ' + esc(r.alt) : ''}</span></button><button class="btn-text danger-text" data-rdel="${i}">Löschen</button></div></li>`).join('')}</ul>` : ''}
-  <p class="group-label">Route</p>
-  <ul class="group">
-    ${row('from', 'Start', f.from)}
-    ${f.via.map((v, k) => row('via', `Zwischenlandung ${f.via.length > 1 ? k + 1 : ''}`, v, k, true)).join('')}
-    <li><button class="row center" id="addVia">＋ Zwischenlandung oder Wegpunkt-Platz hinzufügen</button></li>
-    ${row('to', 'Ziel', f.to)}
-  </ul>
-  <p class="group-label">Ausweichplatz (optional)</p>
-  <ul class="group">${row('alt', 'Ausweich', f.alt)}</ul>
-  <p class="group-note">Unter jedem Platz steht, woher das Wetter kommt. Plätze ohne eigenes METAR/TAF nutzen den TAF eines Nachbarplatzes (bis 30 km) oder die Modellvorhersage.</p>
-  <div class="btn-row">
-    <button class="btn-tinted" id="saveRoute">Route merken</button>
-    <button class="btn-fill" id="next1">Weiter: Flugzeug & Zeit ›</button>
-  </div>`;
-}
-function step1Mount() {
-  const save = (f) => store.set('flight', f);
-  const info = async () => {
-    const W = await wdata(); const f = flightIn();
-    const set = (key, id) => { const el = document.querySelector(`[data-info="${key}"]`); if (!el) return; const r = wxSource(W, (id || '').toUpperCase());
-      el.innerHTML = r ? `<span class="${r.bad ? 'bad' : ''}">${r.name ? `<b>${esc(r.name)}</b> · ` : ''}${esc(r.text)}</span>` : ''; };
-    set('from', f.from); set('to', f.to); set('alt', f.alt); f.via.forEach((v, k) => set('via-' + k, v));
-  };
-  document.querySelectorAll('[data-f]').forEach((el) => el.addEventListener('input', () => {
-    el.value = el.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
-    const f = flightIn();
-    if (el.dataset.f === 'via') f.via[+el.dataset.i] = el.value; else f[el.dataset.f] = el.value;
-    save(f); if (el.value.length === 4 || el.value.length === 0) info();
-  }));
-  document.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', () => { const f = flightIn(); f.via.splice(+b.dataset.rm, 1); save(f); keepScroll(); }));
-  $('addVia').addEventListener('click', () => { const f = flightIn(); if (f.via.length >= 6) return; f.via.push(''); save(f); keepScroll(); });
-  document.querySelectorAll('[data-r]').forEach((b) => b.addEventListener('click', () => {
-    const r = store.get('routes', [])[b.dataset.r]; if (!r) return;
-    save({ from: r.ids[0] || '', via: r.ids.slice(1, -1), to: r.ids.length > 1 ? r.ids[r.ids.length - 1] : '', alt: r.alt || '' }); keepScroll();
-  }));
-  document.querySelectorAll('[data-rdel]').forEach((b) => b.addEventListener('click', () => {
-    const routes = store.get('routes', []); const r = routes[b.dataset.rdel];
-    if (r && confirm(`Route „${r.name}" löschen?`)) { routes.splice(+b.dataset.rdel, 1); store.set('routes', routes); keepScroll(); }
-  }));
-  $('saveRoute').addEventListener('click', () => {
-    const f = flightIn(), ids = flightIds(f);
-    if (ids.length < 2) return alert('Bitte mindestens Start und Ziel eingeben.');
-    const name = prompt('Name der Route', ids.join(' – ')); if (!name?.trim()) return;
-    const routes = store.get('routes', []); routes.push({ name: name.trim(), ids, alt: /^[A-Z0-9]{4}$/.test(f.alt) ? f.alt : '' }); store.set('routes', routes); keepScroll();
-  });
-  $('next1').addEventListener('click', () => {
-    const f = flightIn(), ids = flightIds(f), alt = /^[A-Z0-9]{4}$/.test(f.alt) ? f.alt : null;
-    if (!/^[A-Z0-9]{4}$/.test(f.from) || !/^[A-Z0-9]{4}$/.test(f.to)) return alert('Bitte Start und Ziel als ICAO-Kennung eingeben (4 Zeichen).');
-    const same = F && !F.demo && F.ids.join() === ids.join() && (F.altId || null) === alt && Date.now() - F.fetchedAt < 20 * 6e4;
-    location.hash = '#flug/2';
-    if (!same) loadFlight(ids, alt);
-  });
-  info();
-}
-
 function planFormHTML(p) {
   const dep = depMs(p), d0 = new Date();
   const days = [0, 1, 2].map((k) => { const d = new Date(Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth(), d0.getUTCDate() + k)); return `<option value="${k}"${+p.depDay === k ? ' selected' : ''}>${['Heute', 'Morgen', 'Übermorgen'][k]}, ${dayLabel(d.getTime())}</option>`; }).join('');
@@ -1098,7 +1030,7 @@ function windowsHTML(win, p, tappable) {
   return `<div class="card wincard ${win.length ? 'ok' : 'bad'}">
     <span class="wc-icon">${win.length ? SYM.ok : SYM.warn}</span>
     <div><div class="wc-title">${win.length ? 'Mögliche Abflugzeiten' : 'Keine passende Abflugzeit in 48 h'}</div>
-      <div class="wc-sub">Abflug, Ankunft${B.profile ? ' und Strecke' : ''} über deinen Minima, bei Tageslicht – mit ${esc(p.acData.name)}${tappable && win.length ? '. Antippen übernimmt die Zeit.' : ''}</div>
+      <div class="wc-sub">Abflug, Ankunft${B.profile ? ' und Strecke' : ''} über deinen Minima, bei Tageslicht und innerhalb eingetragener Öffnungszeiten – mit ${esc(p.acData.name)}${tappable && win.length ? '. Antippen übernimmt die Zeit.' : ''}</div>
       ${win.length ? `<div class="wins">${win.map(([a, b]) => `<button class="win${tappable ? '' : ' static'}" data-dep="${a}">${WD[new Date(a).getUTCDay()]} ${hhmm(a)}${b > a ? '–' + hhmm(b) : ''} UTC</button>`).join('')}</div>` : ''}
     </div>
   </div>`;
@@ -1111,111 +1043,7 @@ const flightData = () => {
   const routeOk = ok.filter((x) => !x.ap.isAlt);
   return { s, p, all, ok, fp, win: routeOk.length ? depWindows(routeOk, p, s) : [] };
 };
-const loadingHTML = (n) => `${stepsNav(n)}<div class="empty"><div class="spinner"></div><p>Lade METAR, TAF, Vorhersage und Streckenprofil …</p></div>`;
-const noFlightHTML = (n) => `${stepsNav(n)}<div class="empty">${ICONS.plane}<h3>Noch keine Route</h3><p>Lege zuerst in Schritt 1 Start und Ziel fest.</p><a class="btn-fill" href="#flug/1">Zu Schritt 1</a></div>`;
 const routeLine = () => `<p class="meta">${esc(B.ids.join(' → '))}${B.altId ? ` · Ausweich ${esc(B.altId)}` : ''} · Wetter abgerufen ${utc(B.fetchedAt)}${B.dataAt ? ` · METAR/TAF-Stand ${hhmm(B.dataAt)}Z` : ''}</p>`;
-
-function step2View() {
-  if (loading === 'flug') return loadingHTML(2);
-  if (!B) return noFlightHTML(2);
-  const { s, p, all, fp, win } = flightData();
-  return `${stepsNav(2)}${routeLine()}${bannersHTML()}
-  ${planFormHTML(p)}
-  <h2 class="sec">Vorschau: Wetter zu deinen Zeiten</h2>
-  ${alongHTML(all, fp, s, true)}
-  ${windowsHTML(win, p, true)}
-  <h2 class="sec">Etappen</h2>
-  <div class="card">${planDetailsHTML(fp, p)}</div>
-  <div class="btn-row">
-    <a class="btn-tinted" href="#flug/1">‹ Route</a>
-    <a class="btn-fill" href="#flug/3">Weiter: Briefing ›</a>
-  </div>`;
-}
-function step2Mount() { if (B && !loading) planFormMount(); }
-
-function step3View() {
-  if (loading === 'flug') return loadingHTML(3);
-  if (!B) return noFlightHTML(3);
-  const { s, p, all, ok, fp, win } = flightData();
-  const pc = B.profile && fp.legs.length ? profileCheck(fp, { ...s, alt: p.alt }) : null;
-  const routeTxt = B.ids.join(' → ') + (B.altId ? ` (Ausweich ${B.altId})` : '');
-  return `${stepsNav(3)}
-  <div class="print-only print-head">
-    <h1>Ceiling – Flugvorbereitung</h1>
-    <p><b>${esc(routeTxt)}</b> · ${esc(p.acData.name)} · TAS ${p.tas} kt · ${p.burn} l/h · ${p.alt} ft</p>
-    <p>Export: <span id="exportTime"></span> · Wetter abgerufen: ${utc(B.fetchedAt)}${B.dataAt ? ` (METAR/TAF-Stand ${hhmm(B.dataAt)}Z)` : ''} · Minima: ${s.minCeil} ft / ${s.minVis} km / Wind ${s.maxWind} kt, Böen ${s.maxGust} kt</p>
-  </div>
-  <div class="noprint">${routeLine()}</div>${bannersHTML()}
-
-  <div class="card plancard">
-    <span class="wc-icon">${ICONS.plane}</span>
-    <div class="pc-main"><div class="wc-title">${esc(p.acData.name)} · Abflug ${dayLabel(fp.dep)} ${hhmm(fp.dep)}Z · Ankunft ${hhmm(fp.end)}Z</div>
-      <div class="wc-sub">${Math.round(fp.dist)} NM · ${fmtDur(fp.flight)} · ${Math.ceil(fp.total)} l inkl. ${p.reserve} min Reserve${fp.altLeg ? ` · zum Ausweichplatz zusätzlich ${fmtDur(fp.altLeg.min)}, ${Math.ceil(fp.altLeg.fuel)} l` : ''}</div></div>
-    <a class="btn-text noprint" href="#flug/2">Ändern</a>
-  </div>
-
-  <h2 class="sec">Wetter entlang des Flugs</h2>
-  ${alongHTML(all, fp, s, false)}
-  ${windowsHTML(win, p, false)}
-
-  ${B.profile && fp.legs.length ? `<h2 class="sec">Strecke</h2>
-  <section class="card ap">
-    <div class="ap-head"><div><h3>Streckenprofil</h3><div class="ap-name">Wolkenbasis und Gelände zur geplanten Überflugzeit</div></div>
-      ${pc ? `<span class="status ${pc.bad ? 'bad' : 'ok'}">${pc.gap === Infinity ? 'keine tiefen Wolken' : `min. ${Math.round(pc.gap / 100) * 100} ft über Grund`}</span>` : ''}</div>
-    ${profileSVG(fp, s, p)}
-    <div class="legend"><span><i class="lg-cloud"></i>Wolken (Modell)</span><span><i class="lg-terrain"></i>Gelände</span><span><i class="lg-taf"></i>Reiseflughöhe</span><span><i class="lg-below"></i>Abstand Wolken–Gelände unter Minimum</span></div>
-    ${pc && pc.gap !== Infinity ? `<p class="sun">Engste Stelle: ${Math.round(pc.d)} NM nach Abflug, ca. ${hhmm(pc.t)}Z – Basis ${Math.round(pc.cb / 100) * 100} ft MSL, Gelände ${Math.round(pc.terr / 100) * 100} ft.${pc.inCloud ? ' <span class="bad">Reiseflughöhe liegt dort zu nah an oder über der Wolkenbasis.</span>' : ''}</p>` : ''}
-    <p class="sun">Gelände entlang der direkten Linie (ohne Hindernisse), Wolkenbasis aus dem Modell – nur zur Orientierung.</p>
-  </section>` : ''}
-
-  <h2 class="sec">Etappen und Kraftstoff</h2>
-  <div class="card">${planDetailsHTML(fp, p)}</div>
-
-  <h2 class="sec">48 Stunden</h2>
-  <div class="card">${ok.length ? timelineHTML(ok, fp) : ''}
-    <div class="legend"><span><i class="cat-VFR"></i>VFR</span><span><i class="cat-MVFR"></i>MVFR</span><span><i class="cat-IFR"></i>IFR</span><span><i class="cat-LIFR"></i>LIFR</span>
-    <span><i class="lg-below"></i>unter Minima</span><span><i class="lg-tempo2"></i>TEMPO unter Minima</span><span>● = deine Zeit am Platz</span></div>
-  </div>
-  <div class="card noprint pick">
-    <input type="range" id="slider" min="0" max="${SPAN - 1}" step="1" value="${sel}" aria-label="Stunde wählen">
-    <div id="detail">${ok.length ? detailHTML(ok) : ''}</div>
-  </div>
-
-  <h2 class="sec">Plätze im Detail</h2>
-  ${all.map(({ ap, hours }) => airportCard(ap, hours, s, fp)).join('')}
-
-  <h2 class="sec">Checkliste</h2>
-  ${CHECKS_HTML(fp)}
-
-  <button class="btn-fill big noprint" id="pdfBig">${SYM.share} Briefing als PDF sichern</button>
-
-  <p class="foot">Quellen: METAR/TAF aviationweather.gov (NOAA), Flugplätze OurAirports, Modell und Gelände Open-Meteo (u. a. DWD ICON). Modell-Ceiling ist eine grobe Schätzung aus Bewölkung in Druckflächen.
-  Wetter zu deinen Zeiten: METAR nur, wenn der Zeitpunkt höchstens 1 h entfernt ist, sonst TAF (BECMG vorsichtig: Verschlechterung ab Beginn, Besserung erst ab Ende), sonst Modell.
-  Keine amtliche Flugwetterberatung – vor dem Flug offizielle Quellen (DWD) prüfen. Kategorien: VFR &gt; 3000 ft und &gt; 8 km, MVFR ≤ 3000 ft / ≤ 8 km, IFR &lt; 1000 ft / &lt; 4,8 km, LIFR &lt; 500 ft / &lt; 1,6 km.</p>`;
-}
-function step3Mount() {
-  $('reload')?.addEventListener('click', () => { if (!B) return; if (B.demo) { F = makeDemo(); route(); } else loadFlight(B.ids, B.altId); });
-  $('pdf')?.addEventListener('click', exportPDF);
-  $('pdfBig')?.addEventListener('click', exportPDF);
-  $('save')?.addEventListener('click', () => {
-    const name = prompt('Name der Route', B.ids.join(' – ')); if (!name?.trim()) return;
-    const routes = store.get('routes', []); routes.push({ name: name.trim(), ids: B.ids, alt: B.altId || '' }); store.set('routes', routes); alert('Route gespeichert.');
-  });
-  document.querySelectorAll('[data-c]').forEach((el) => el.addEventListener('change', () => { const c = checks(); c[el.dataset.c] = el.checked; store.set('checks', c); }));
-  $('ckReset')?.addEventListener('click', () => { store.set('checks', {}); keepScroll(); });
-  if (!B || loading) return;
-  const s = settings();
-  mountTimeControls(B.airports.filter((a) => !a.error).map((ap) => ({ ap, hours: computeHours(ap, B.start, s) })));
-}
-
-function flugView(sub) {
-  const n = Math.max(1, Math.min(3, +sub || 1));
-  return n === 1 ? step1View() : n === 2 ? step2View() : step3View();
-}
-function flugMount(sub) {
-  const n = Math.max(1, Math.min(3, +sub || 1));
-  (n === 1 ? step1Mount : n === 2 ? step2Mount : step3Mount)();
-}
 
 // PDF: Druckansicht des Browsers (am iPad: Teilen › Drucken › Als PDF sichern / Teilen)
 function exportPDF() {
@@ -1223,7 +1051,7 @@ function exportPDF() {
   const el = $('exportTime'); if (el) el.textContent = `${utc(now)} (${local(now)} Ortszeit)`;
   const d = new Date(now);
   const old = document.title;
-  document.title = `Ceiling ${B.ids.join('-')} ${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())} ${p2(d.getUTCHours())}${p2(d.getUTCMinutes())}Z`;
+  document.title = `FlightPrep ${B.ids.join('-')} ${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())} ${p2(d.getUTCHours())}${p2(d.getUTCMinutes())}Z`;
   setTimeout(() => { window.print(); setTimeout(() => { document.title = old; }, 1000); }, 50);
 }
 addEventListener('beforeprint', () => { const el = $('exportTime'); if (el && !el.textContent) el.textContent = `${utc(Date.now())} (${local(Date.now())} Ortszeit)`; });
@@ -1278,18 +1106,681 @@ function makeDemo() {
   };
 }
 
+// =====================================================================
+// FlightPrep – Module: 1 Flug · 2 Wetter · 3 NOTAM · 4 Kraftstoff · 5 Masse & Schwerpunkt · 6 Checkliste · Briefing
+// =====================================================================
+
+// ---------- Dateien (Karten, NOTAM-Anhänge) im Gerät: IndexedDB ----------
+const files = {
+  db: null,
+  async open() {
+    if (this.db) return this.db;
+    this.db = await new Promise((res, rej) => {
+      const r = indexedDB.open('flightprep', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('files');
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+    return this.db;
+  },
+  async run(mode, fn) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const t = db.transaction('files', mode), req = fn(t.objectStore('files'));
+      t.oncomplete = () => res(req?.result); t.onerror = () => rej(t.error);
+    });
+  },
+  put(k, v) { return this.run('readwrite', (s) => s.put(v, k)); },
+  get(k) { return this.run('readonly', (s) => s.get(k)); },
+  del(k) { return this.run('readwrite', (s) => s.delete(k)); },
+  async list(prefix) { const keys = (await this.run('readonly', (s) => s.getAllKeys())) || []; return keys.filter((k) => String(k).startsWith(prefix)).sort(); },
+};
+async function readFile(file) {
+  if (file.type.startsWith('image/')) {
+    const img = await createImageBitmap(file);
+    const sc = Math.min(1, 2000 / Math.max(img.width, img.height));
+    const c = document.createElement('canvas'); c.width = Math.round(img.width * sc); c.height = Math.round(img.height * sc);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return { name: file.name, type: 'image/jpeg', data: c.toDataURL('image/jpeg', 0.85), at: Date.now() };
+  }
+  const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(file); });
+  return { name: file.name, type: file.type || 'application/octet-stream', data, at: Date.now() };
+}
+// Liste von Dateien anzeigen (Bilder als Vorschau, PDFs als Link) – wird nach dem Rendern befüllt
+const filesBox = (prefix, editable) => `<div class="files" data-files="${esc(prefix)}" data-edit="${editable ? 1 : 0}"></div>`;
+async function fillFiles(root = document) {
+  for (const box of root.querySelectorAll('[data-files]')) {
+    const keys = await files.list(box.dataset.files).catch(() => []);
+    const items = await Promise.all(keys.map(async (k) => ({ k, f: await files.get(k) })));
+    box.innerHTML = items.length ? items.map(({ k, f }) => `<figure class="file">
+        ${f.type.startsWith('image/') ? `<img src="${f.data}" alt="${esc(f.name)}">` : `<a class="file-doc" href="${f.data}" download="${esc(f.name)}" target="_blank" rel="noopener">📄 ${esc(f.name)}</a>`}
+        <figcaption>${esc(f.name)} · ${utc(f.at)}${box.dataset.edit === '1' ? ` <button class="btn-text danger-text noprint" data-fdel="${esc(k)}">Entfernen</button>` : ''}</figcaption>
+      </figure>`).join('') : (box.dataset.edit === '1' ? '<p class="detail">Noch keine Dateien.</p>' : '');
+    box.querySelectorAll('[data-fdel]').forEach((b) => b.addEventListener('click', async () => {
+      if (!confirm('Datei entfernen?')) return; await files.del(b.dataset.fdel); fillFiles(box.parentElement);
+    }));
+  }
+}
+function bindUpload(input, prefix, after) {
+  input?.addEventListener('change', async () => {
+    for (const f of input.files) { const v = await readFile(f); await files.put(`${prefix}${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, v); }
+    input.value = ''; after ? after() : fillFiles();
+  });
+}
+
+// ---------- Flugplatz-Infos aus der AIP (vom Nutzer eingetragen) ----------
+const apInfo = (id) => ({ mode: 'unknown', open: '', close: '', ppr: false, notes: '', checkedAt: null, ...(store.get('apinfo', {})[id] || {}) });
+function setApInfo(id, patch) { const all = store.get('apinfo', {}); all[id] = { ...apInfo(id), ...patch, checkedAt: Date.now() }; store.set('apinfo', all); }
+// Ist der Platz zur Zeit t geöffnet? null = unbekannt
+function isOpen(ap, t) {
+  const i = apInfo(ap.id);
+  if (i.mode === 'h24') return true;
+  if (i.mode === 'srss') return sunAlt(ap.lat, ap.lon, t) >= -0.833;
+  if (i.mode === 'times' && /^\d{2}:\d{2}$/.test(i.open) && /^\d{2}:\d{2}$/.test(i.close)) {
+    const d = new Date(t), m = d.getUTCHours() * 60 + d.getUTCMinutes();
+    const [a, b] = [i.open, i.close].map((s) => +s.slice(0, 2) * 60 + +s.slice(3));
+    return a <= b ? m >= a && m < b : m >= a || m < b;
+  }
+  return null;
+}
+const hoursText = (id) => { const i = apInfo(id);
+  return i.mode === 'h24' ? 'H24' : i.mode === 'srss' ? 'SR–SS' : i.mode === 'times' && i.open && i.close ? `${i.open}–${i.close} UTC` : 'nicht eingetragen'; };
+
+// ---------- Masse & Schwerpunkt: Typdaten mit Quellen ----------
+// status: 'belegt' = in mindestens einer Quelle gefunden · 'leer' = keine belastbare Quelle gefunden, bitte aus dem Handbuch eintragen
+// Leermasse/-hebelarm sind immer flugzeugspezifisch (Wägebericht)!
+const WB_TYPES = {
+  C152: { unit: 'lb', armUnit: 'in', mtow: 1670, fuelArm: 42.2, fuelDensity: 0.72, usableFuel: null,
+    stations: [{ k: 'front', name: 'Pilot + Beifahrer', arm: 39.0 }, { k: 'bag1', name: 'Gepäck Bereich 1', arm: 64.0 }, { k: 'bag2', name: 'Gepäck Bereich 2', arm: 84.0 }],
+    baggageMax: 120, env: [[1000, 31.0], [1350, 31.0], [1670, 32.6], [1670, 36.5], [1000, 36.5]],
+    sample: { mass: 1140.7, arm: 32.89, src: 'Beispiel-Flugzeug N152UF (WVFC)' },
+    src: ['WVFC W&B-Rechner (Hüllkurve, Hebelarme, MTOW): tools.wvfc.org', 'Cessna 152 W&B-Blatt (Hebelarme 39/42,2/64/84): fasclub.com'],
+    notes: 'Hüllkurve aus Vereinsrechner abgeleitet. Mit Abschnitt 6 deines POH abgleichen.' },
+  C172: { unit: 'lb', armUnit: 'in', mtow: 2550, fuelArm: null, fuelDensity: 0.72, usableFuel: null,
+    stations: [{ k: 'front', name: 'Pilot + Beifahrer', arm: null }, { k: 'rear', name: 'Rücksitze', arm: null }, { k: 'bag1', name: 'Gepäck A', arm: null }, { k: 'bag2', name: 'Gepäck B', arm: null }],
+    baggageMax: 120, env: [],
+    sample: { mass: 1663, arm: null, src: 'Standard-Leermasse 172S NAV III (POH), Hebelarm nicht gefunden' },
+    src: ['Cessna 172S POH (MTOW 2550 lb, Gepäck A+B max. 120 lb, Standard-Leermasse 1663 lb)'],
+    notes: 'Hebelarme und Hüllkurve konnte ich nicht belastbar belegen – bitte aus Abschnitt 6 des POH eintragen (gilt für 172S; andere Varianten abweichend).' },
+  PS28: { unit: 'kg', armUnit: 'mm', mtow: 600, fuelArm: null, fuelDensity: 0.72, usableFuel: null,
+    stations: [{ k: 'front', name: 'Pilot + Beifahrer', arm: null }, { k: 'bag1', name: 'Gepäck hinten (max. 18 kg)', arm: null }, { k: 'bag2', name: 'Gepäck Flügelfächer (je max. 10 kg)', arm: null }],
+    baggageMax: null, env: [],
+    sample: { mass: 387.0, arm: 432.4, src: 'Beladebeispiel im PS-28 POH (Bezugsebene Flügelvorderkante)' },
+    src: ['PS-28 Cruiser POH PS-POH-1-1-12 (MTOW 600 kg, Gepäck 18 kg + 2×10 kg, Schwerpunkt 28–35 % MAC)'],
+    notes: 'Der POH gibt die Grenzen in % MAC an. Ohne belegte MAC-Werte kann ich sie nicht in mm umrechnen – Hebelarme und Grenzen bitte aus dem POH eintragen. Kraftstoffdichte: 0,72 für AvGas; bei MoGas anpassen.' },
+  PA28: { unit: 'lb', armUnit: 'in', mtow: 2550, fuelArm: 95.0, fuelDensity: 0.72, usableFuel: null,
+    stations: [{ k: 'front', name: 'Vordersitze', arm: null }, { k: 'rear', name: 'Rücksitze', arm: 118.1 }, { k: 'bag1', name: 'Gepäck (max. 200 lb)', arm: 142.8 }],
+    baggageMax: 200, env: [],
+    sample: null,
+    src: ['PA-28-181 Rechner metarcentral/aviatize (Hebelarme hinten 118,1 / Gepäck 142,8 / Kraftstoff 95,0)', 'Archer II POH (MTOW 2550 lb, Gepäck max. 200 lb, hintere Grenze 93,0 in)'],
+    notes: 'Vordersitze: Quellen nennen 80,5 oder 85,5 in (sitzabhängig). Vordere Schwerpunktgrenze bei 2550 lb widersprüchlich (83–88,6 in). Bitte beides aus deinem POH eintragen. Gilt nur für PA-28-181.' },
+  SR22: { unit: 'lb', armUnit: 'in', mtow: 3400, fuelArm: 154.9, fuelDensity: 0.72, usableFuel: null,
+    stations: [{ k: 'front', name: 'Vordersitze', arm: 143.5 }, { k: 'rear', name: 'Rücksitze', arm: 180.0 }, { k: 'bag1', name: 'Gepäck (max. 130 lb)', arm: 208.0 }],
+    baggageMax: 130, env: [[2100, 137.8], [2700, 139.1], [3400, 142.3], [3400, 148.1], [2100, 148.1]],
+    sample: { mass: 2357, arm: 138.0, src: 'Beispiel-Flugzeug N809SR (WVFC)' },
+    src: ['WVFC W&B-Rechner SR22 N809SR (Hebelarme, MTOW 3400 lb, Hüllkurve)'],
+    notes: 'Gilt für SR22 mit 3400 lb MTOW (ältere Baureihen). Neuere SR22 haben 3600 lb und eine andere Hüllkurve – mit POH abgleichen.' },
+  TB20: { unit: 'kg', armUnit: 'm', mtow: 1400, fuelArm: null, fuelDensity: 0.72, usableFuel: null,
+    stations: [{ k: 'front', name: 'Vordersitze', arm: null }, { k: 'rear', name: 'Rücksitze', arm: null }, { k: 'bag1', name: 'Gepäck (max. 65 kg)', arm: null }],
+    baggageMax: 65, env: [],
+    sample: { mass: 800, arm: null, src: 'Standard-Leermasse vor MOD.151 laut POH (nach MOD.151: 823 kg), Hebelarm nicht gefunden' },
+    src: ['Socata TB20 Pilot\'s Information Manual (MTOW 1400 kg, Gepäck max. 65 kg, Leermasse 800/823 kg)'],
+    notes: 'Hebelarme und Hüllkurve nicht belastbar gefunden (Teilwerte 0,913 m / 1,205 m ohne eindeutige Zuordnung) – bitte aus Abschnitt 6 eintragen.' },
+  DA40: { unit: 'kg', armUnit: 'm', mtow: 1280, fuelArm: 2.63, fuelDensity: 0.80, usableFuel: null,
+    stations: [{ k: 'front', name: 'Vordersitze', arm: 2.30 }, { k: 'rear', name: 'Rücksitze', arm: 3.25 }, { k: 'bag1', name: 'Gepäckraum', arm: 3.65 }, { k: 'bag2', name: 'Gepäckerweiterung', arm: 4.54 }],
+    baggageMax: null, env: [],
+    sample: null,
+    src: ['DA40 NG AFM (Hebelarme 2,30/3,25/3,65/4,54 m, Kraftstoff 2,63 m, MTOM 1280 kg bzw. 1310 kg mit MÄM 40-662)'],
+    notes: 'Hüllkurve nicht gefunden – bitte aus dem AFM eintragen. Jet A-1: Dichte laut Spezifikation 0,775–0,840 kg/l, hier 0,80 angenommen.' },
+};
+const LB = 2.20462;
+const wbType = (ac) => {
+  const base = WB_TYPES[ac] || WB_TYPES.C172, ov = store.get('wbTypes', {})[ac] || {};
+  const st = base.stations.map((s) => ({ ...s, arm: ov.arms?.[s.k] ?? s.arm, edited: ov.arms?.[s.k] != null }));
+  return { ...base, ...ov, stations: st, env: ov.env ?? base.env, edited: !!Object.keys(ov).length };
+};
+const wbFlight = () => ({ emptyMass: null, emptyArm: null, front: 0, rear: 0, bag1: 0, bag2: 0, ...store.get('wbFlight', {})[plan().ac] });
+function setWbFlight(patch) { const all = store.get('wbFlight', {}); const ac = plan().ac; all[ac] = { ...wbFlight(), ...patch }; store.set('wbFlight', all); }
+
+// Punkt in Polygon (Masse, Arm)
+function inEnvelope(env, mass, arm) {
+  if (!env || env.length < 3) return null;
+  let inside = false;
+  for (let i = 0, j = env.length - 1; i < env.length; j = i++) {
+    const [mi, ai] = env[i], [mj, aj] = env[j];
+    if ((mi > mass) !== (mj > mass) && arm < ((aj - ai) * (mass - mi)) / (mj - mi) + ai) inside = !inside;
+  }
+  return inside;
+}
+
+// ---------- Kraftstoff ----------
+const fuelIn = () => ({ onBoard: null, extraMin: 0, withAlt: false, ...store.get('fuel', {}) });
+function fuelCalc(fp, p) {
+  const f = fuelIn();
+  const alt = f.withAlt && fp.altLeg ? fp.altLeg.fuel : 0;
+  const extra = (f.extraMin / 60) * p.burn;
+  const required = fp.trip + fp.taxi + fp.reserve + alt + extra;
+  const onBoard = f.onBoard != null ? +f.onBoard : null;
+  const takeoff = onBoard != null ? Math.max(0, onBoard - fp.taxi) : null;
+  const landing = takeoff != null ? Math.max(0, takeoff - fp.trip) : null;
+  return { ...f, alt, extra, required, onBoard, takeoff, landing, ok: onBoard != null ? onBoard >= required : null,
+    endurance: onBoard != null ? ((onBoard - fp.taxi) / p.burn) * 60 : null };
+}
+
+// ---------- Masse & Schwerpunkt berechnen ----------
+function wbCalc(p, fc) {
+  const T = wbType(p.ac), W = wbFlight(), lbType = T.unit === 'lb';
+  const toU = (kg) => (lbType ? kg * LB : kg); // kg → Einheit des Typs
+  const items = [];
+  const missing = [];
+  const emptyMass = W.emptyMass ?? T.sample?.mass ?? null, emptyArm = W.emptyArm ?? T.sample?.arm ?? null;
+  const emptyIsSample = W.emptyMass == null || W.emptyArm == null;
+  if (emptyMass == null || emptyArm == null) missing.push('Leermasse/Hebelarm');
+  items.push({ name: 'Leermasse', mass: emptyMass, arm: emptyArm, sample: emptyIsSample });
+  T.stations.forEach((s) => {
+    const m = toU(+W[s.k] || 0);
+    if (m > 0 && s.arm == null) missing.push(`Hebelarm ${s.name}`);
+    items.push({ name: s.name, mass: m, arm: s.arm, kg: +W[s.k] || 0 });
+  });
+  const fuelKg = (l) => (l == null ? null : l * (T.fuelDensity || 0.72));
+  const fuelTo = fuelKg(fc.takeoff), fuelLd = fuelKg(fc.landing);
+  if (fc.takeoff == null) missing.push('Kraftstoff an Bord (Modul 4)');
+  if (T.fuelArm == null && fc.takeoff) missing.push('Hebelarm Kraftstoff');
+  const sum = (fuelU) => {
+    let m = 0, mom = 0, ok = true;
+    for (const it of items) { if (it.mass == null) { ok = false; continue; } m += it.mass; if (it.mass > 0) { if (it.arm == null) ok = false; else mom += it.mass * it.arm; } }
+    if (fuelU != null) { m += fuelU; if (fuelU > 0) { if (T.fuelArm == null) ok = false; else mom += fuelU * T.fuelArm; } }
+    return { mass: m, arm: ok && m ? mom / m : null };
+  };
+  const to = sum(fuelTo != null ? toU(fuelTo) : null), ld = sum(fuelLd != null ? toU(fuelLd) : null);
+  const envOk = T.env.length >= 3;
+  if (!envOk) missing.push('Schwerpunkt-Hüllkurve');
+  const check = (r) => ({ ...r, overMtow: T.mtow != null && r.mass > T.mtow, inEnv: r.arm != null && envOk ? inEnvelope(T.env, r.mass, r.arm) : null });
+  return { T, W, items, fuelTo: fuelTo != null ? toU(fuelTo) : null, fuelLd: fuelLd != null ? toU(fuelLd) : null, to: check(to), ld: check(ld), missing, emptyIsSample };
+}
+
+function envelopeSVG(wb) {
+  const { T, to, ld } = wb; if (T.env.length < 3) return '';
+  const pts = [...T.env, ...(to.arm != null ? [[to.mass, to.arm]] : []), ...(ld.arm != null ? [[ld.mass, ld.arm]] : [])];
+  const ms = pts.map((q) => q[0]), as = pts.map((q) => q[1]);
+  const mMin = Math.min(...ms) * 0.95, mMax = Math.max(...ms) * 1.03, aMin = Math.min(...as), aMax = Math.max(...as), pad = (aMax - aMin) * 0.12 || 1;
+  const W = 640, Hh = 360, L = 64, R = 16, Tp = 16, B = 44;
+  const x = (a) => L + ((a - (aMin - pad)) / (aMax - aMin + 2 * pad)) * (W - L - R);
+  const y = (m) => Tp + (1 - (m - mMin) / (mMax - mMin)) * (Hh - Tp - B);
+  let g = `<polygon class="wb-env" points="${T.env.map(([m, a]) => `${x(a).toFixed(1)},${y(m).toFixed(1)}`).join(' ')}"/>`;
+  const step = (mMax - mMin) > 600 ? 200 : (mMax - mMin) > 250 ? 100 : 50;
+  for (let m = Math.ceil(mMin / step) * step; m <= mMax; m += step) g += `<line class="ch-grid" x1="${L}" x2="${W - R}" y1="${y(m)}" y2="${y(m)}"/><text class="ch-label" x="${L - 6}" y="${y(m) + 4}" text-anchor="end">${m}</text>`;
+  const astep = (aMax - aMin + 2 * pad) > 20 ? 5 : (aMax - aMin + 2 * pad) > 4 ? 1 : (aMax - aMin + 2 * pad) > 0.6 ? 0.1 : 0.05;
+  for (let a = Math.ceil((aMin - pad) / astep) * astep; a <= aMax + pad; a += astep) g += `<text class="ch-label" x="${x(a)}" y="${Hh - B + 18}" text-anchor="middle">${+a.toFixed(2)}</text>`;
+  if (T.mtow) g += `<line class="ch-min" x1="${L}" x2="${W - R}" y1="${y(T.mtow)}" y2="${y(T.mtow)}"/>`;
+  if (to.arm != null && ld.arm != null) g += `<line class="wb-line" x1="${x(to.arm)}" y1="${y(to.mass)}" x2="${x(ld.arm)}" y2="${y(ld.mass)}"/>`;
+  if (to.arm != null) g += `<circle class="wb-pt ${to.inEnv && !to.overMtow ? 'ok' : 'bad'}" cx="${x(to.arm)}" cy="${y(to.mass)}" r="8"/><text class="ch-label ch-strong" x="${x(to.arm) + 12}" y="${y(to.mass) - 8}">Start</text>`;
+  if (ld.arm != null) g += `<circle class="wb-pt ld ${ld.inEnv && !ld.overMtow ? 'ok' : 'bad'}" cx="${x(ld.arm)}" cy="${y(ld.mass)}" r="7"/><text class="ch-label" x="${x(ld.arm) + 12}" y="${y(ld.mass) + 16}">Landung</text>`;
+  g += `<text class="ch-label" x="${W - R}" y="${Hh - 6}" text-anchor="end">Hebelarm (${T.armUnit})</text><text class="ch-label" x="${L}" y="${Tp - 4}">Masse (${T.unit})</text>`;
+  return `<svg class="chart wb-chart" viewBox="0 0 ${W} ${Hh}" role="img" aria-label="Schwerpunkt-Hüllkurve">${g}</svg>`;
+}
+
+// ---------- Modul-Übersicht ----------
+const MODULES = [
+  { id: 'flug', n: 1, title: 'Flug', sub: 'Route, Flugzeug, Abflug, Flugplatz-Infos' },
+  { id: 'wetter', n: 2, title: 'Wetter', sub: 'Ceiling, METAR/TAF zu deinen Zeiten, Öffnungszeiten, Tag/Nacht' },
+  { id: 'notam', n: 3, title: 'NOTAM', sub: 'Korridor, Abfrage bei der DFS, Nachweis' },
+  { id: 'fuel', n: 4, title: 'Kraftstoff', sub: 'Bedarf aus Strecke, Wind und Flugzeug' },
+  { id: 'wb', n: 5, title: 'Masse & Schwerpunkt', sub: 'Weight & Balance mit Kraftstoff aus Modul 4' },
+  { id: 'check', n: 6, title: 'Checkliste', sub: 'Ausweichplatz, Pisten, persönliche Fitness …' },
+];
+function moduleStatus(id) {
+  const f = flightIn(), ids = flightIds(f), p = plan();
+  if (id === 'flug') return ids.length >= 2 ? { ok: true, text: `${ids.join(' → ')} · ${p.acData.name}` } : { ok: false, text: 'Route fehlt' };
+  if (!F || F.ids.join() !== ids.join()) return { ok: false, text: id === 'wetter' ? 'Wetter in Modul 1 laden' : 'zuerst Modul 1 abschließen' };
+  B = F;
+  const s = settings(), fp = flightPlan(depMs(p), p);
+  if (id === 'wetter') {
+    const all = F.airports.map((ap) => ({ ap, hours: ap.error ? null : computeHours(ap, F.start, s) }));
+    const bad = all.filter(({ ap, hours }) => { const e = fp.eta[ap.id]; if (!e || !hours || ap.isAlt) return false; const v = evalAt(ap, hours, e.t, s); return statusCls(v) !== 'ok' || isOpen(ap, e.t) === false; });
+    return bad.length ? { ok: false, warn: true, text: `${bad.length} Platz/Plätze nicht in Ordnung` } : { ok: true, text: `Abflug ${hhmm(fp.dep)}Z · alle Plätze über Minima` };
+  }
+  if (id === 'notam') { const n = store.get('notam', {}); return n.key === ids.join() && n.checkedAt ? { ok: true, text: `geprüft ${utc(n.checkedAt)}` } : { ok: false, text: 'noch nicht geprüft' }; }
+  if (id === 'fuel') { const fc = fuelCalc(fp, p); return fc.ok == null ? { ok: false, text: `Bedarf ${Math.ceil(fc.required)} l – an Bord eintragen` } : fc.ok ? { ok: true, text: `${fc.onBoard} l an Bord ≥ ${Math.ceil(fc.required)} l Bedarf` } : { ok: false, warn: true, text: `zu wenig: ${fc.onBoard} l < ${Math.ceil(fc.required)} l` }; }
+  if (id === 'wb') { const wb = wbCalc(p, fuelCalc(fp, p));
+    if (wb.missing.length) return { ok: false, text: `fehlt: ${wb.missing.join(', ')}` };
+    const good = !wb.to.overMtow && wb.to.inEnv && wb.ld.inEnv;
+    return good ? { ok: !wb.emptyIsSample, warn: wb.emptyIsSample, text: `innerhalb der Grenzen${wb.emptyIsSample ? ' – mit Beispiel-Leermasse!' : ''}` } : { ok: false, warn: true, text: 'außerhalb der Grenzen' }; }
+  if (id === 'check') { const c = checks(), n = CHECKS.filter(([k]) => c[k]).length; return { ok: n === CHECKS.length, text: `${n} von ${CHECKS.length} abgehakt` }; }
+  return { ok: false, text: '' };
+}
+function overviewView() {
+  return `<p class="meta">Arbeite die Module der Reihe nach ab. Am Ende erstellst du das gesamte Briefing als PDF.</p>
+  <ul class="group modules">${MODULES.map((m) => { const st = moduleStatus(m.id);
+    return `<li><a class="row mod" href="#prep/${m.id}"><span class="mod-n ${st.ok ? 'ok' : st.warn ? 'warn' : ''}">${st.ok ? '✓' : m.n}</span>
+      <span class="mod-main"><b>${m.title}</b><span>${esc(st.text || m.sub)}</span></span><span class="chevron">›</span></a></li>`; }).join('')}</ul>
+  <a class="btn-fill big" href="#prep/briefing">${SYM.share} Gesamtes Briefing erstellen</a>
+  <p class="group-note">Keine amtliche Flugvorbereitung. Alle Angaben vor dem Flug mit den amtlichen Quellen (DWD, DFS, Flughandbuch) prüfen.</p>`;
+}
+const modNav = (id) => {
+  const i = MODULES.findIndex((m) => m.id === id), prev = MODULES[i - 1], next = MODULES[i + 1];
+  return `<div class="btn-row noprint">${prev ? `<a class="btn-tinted" href="#prep/${prev.id}">‹ ${prev.title}</a>` : '<a class="btn-tinted" href="#prep">‹ Übersicht</a>'}
+    ${next ? `<a class="btn-fill" href="#prep/${next.id}">Weiter: ${next.title} ›</a>` : '<a class="btn-fill" href="#prep/briefing">Briefing erstellen ›</a>'}</div>`;
+};
+const needWeather = (n) => `<div class="empty">${ICONS.cloud}<h3>Noch keine Wetterdaten für diese Route</h3><p>In Modul 1 Route eingeben und „Wetter laden“ tippen.</p><a class="btn-fill" href="#prep/flug">Zu Modul 1</a></div>`;
+const weatherReady = () => { const ids = flightIds(flightIn()); return F && F.ids.join() === ids.join(); };
+
+// ---------- Modul 1: Flug ----------
+const AIP_LINK = 'https://aip.dfs.de/basicVFR';
+function apInfoHTML() {
+  const f = flightIn();
+  const ids = [...flightIds(f), ...(/^[A-Z0-9]{4}$/.test(f.alt) ? [f.alt] : [])];
+  const hoursSel = (id) => { const i = apInfo(id);
+    return `<select data-ah="${id}" data-k="mode">${[['unknown', 'nicht eingetragen'], ['times', 'Uhrzeit (UTC)'], ['srss', 'SR–SS (Tageslicht)'], ['h24', 'H24']].map(([v, t]) => `<option value="${v}"${i.mode === v ? ' selected' : ''}>${t}</option>`).join('')}</select>`; };
+  return ids.length ? ids.map((id) => { const i = apInfo(id);
+    return `<div class="card apinfo" data-ap="${id}">
+      <div class="ap-head"><div><h3>${esc(id)}</h3><div class="ap-name" data-name="${id}"></div></div>
+        <a class="btn-tinted small" href="${AIP_LINK}" target="_blank" rel="noopener">AIP VFR öffnen ↗</a></div>
+      <ul class="group inner">
+        <li><label class="row"><span>Öffnungszeit</span>${hoursSel(id)}</label></li>
+        ${i.mode === 'times' ? `<li><div class="row"><span>von / bis (UTC)</span><span class="inp"><input type="time" data-ah="${id}" data-k="open" value="${esc(i.open)}"> – <input type="time" data-ah="${id}" data-k="close" value="${esc(i.close)}"></span></div></li>` : ''}
+        <li><label class="row"><span>PPR erforderlich</span><input type="checkbox" class="switch" data-ah="${id}" data-k="ppr"${i.ppr ? ' checked' : ''}></label></li>
+        <li><label class="row col"><span>Notizen (Pisten, Frequenzen, Besonderheiten)</span><textarea data-ah="${id}" data-k="notes" rows="2" placeholder="z. B. Piste 08/26 Gras 800 m, Info 123,455">${esc(i.notes)}</textarea></label></li>
+      </ul>
+      <p class="detail">${i.checkedAt ? `Zuletzt geändert ${utc(i.checkedAt)}` : 'Noch nicht eingetragen.'} Öffnungszeiten können sich ändern – vor jedem Flug in der AIP und den NOTAM prüfen.</p>
+      <p class="group-label tight">Flugplatzkarten</p>
+      ${filesBox(`chart:${id}:`, true)}
+      <label class="btn-tinted small upload">Karte hinzufügen (Foto, Screenshot, PDF)<input type="file" accept="image/*,application/pdf" multiple data-up="chart:${id}:" hidden></label>
+    </div>`; }).join('') : '<p class="group-note">Erst Route eingeben.</p>';
+}
+function apInfoMount(W) {
+  const box = $('apinfoBox'); if (!box) return;
+  box.querySelectorAll('[data-ah]').forEach((el) => el.addEventListener('change', () => {
+    setApInfo(el.dataset.ah, { [el.dataset.k]: el.type === 'checkbox' ? el.checked : el.value });
+    if (el.dataset.k === 'mode') { box.innerHTML = apInfoHTML(); apInfoMount(W); }
+  }));
+  box.querySelectorAll('[data-up]').forEach((inp) => bindUpload(inp, inp.dataset.up, () => fillFiles(box)));
+  if (W) box.querySelectorAll('[data-name]').forEach((el) => { const a = W.airports[el.dataset.name]; el.textContent = a ? a[0] + (a[3] != null ? ` · ${a[3]} ft` : '') : ''; });
+  fillFiles(box);
+}
+function m1View() {
+  const f = flightIn(), routes = store.get('routes', []), p = plan();
+  const ids = [...flightIds(f), ...(/^[A-Z0-9]{4}$/.test(f.alt) ? [f.alt] : [])];
+  const row = (key, label, val, k, removable) => `<li><div class="row route-row">
+      <span class="rr-label">${label}</span>
+      <input type="text" class="icao" maxlength="4" data-f="${key}"${k != null ? ` data-i="${k}"` : ''} value="${esc(val)}" placeholder="ICAO" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false">
+      ${removable ? `<button class="btn-text danger-text" data-rm="${k}">Entfernen</button>` : ''}
+    </div><div class="rr-info" data-info="${key}${k != null ? '-' + k : ''}"></div></li>`;
+  const hoursSel = (id) => { const i = apInfo(id);
+    return `<select data-ah="${id}" data-k="mode">${[['unknown', 'nicht eingetragen'], ['times', 'Uhrzeit (UTC)'], ['srss', 'SR–SS (Tageslicht)'], ['h24', 'H24']].map(([v, t]) => `<option value="${v}"${i.mode === v ? ' selected' : ''}>${t}</option>`).join('')}</select>`; };
+  return `
+  ${routes.length ? `<p class="group-label">Gespeicherte Routen</p>
+  <ul class="group">${routes.map((r, i) => `<li><div class="row"><button class="row-btn" data-r="${i}"><span>${esc(r.name)}</span><span class="detail">${esc(r.ids.join(' → '))}${r.alt ? ' · Ausweich ' + esc(r.alt) : ''}</span></button><button class="btn-text danger-text" data-rdel="${i}">Löschen</button></div></li>`).join('')}</ul>` : ''}
+  <p class="group-label">Route</p>
+  <ul class="group">
+    ${row('from', 'Start', f.from)}
+    ${f.via.map((v, k) => row('via', `Zwischenlandung ${f.via.length > 1 ? k + 1 : ''}`, v, k, true)).join('')}
+    <li><button class="row center" id="addVia">＋ Zwischenlandung oder Wegpunkt-Platz hinzufügen</button></li>
+    ${row('to', 'Ziel', f.to)}
+  </ul>
+  <p class="group-label">Ausweichplatz</p>
+  <ul class="group">${row('alt', 'Ausweich', f.alt)}</ul>
+  <div class="btn-row"><button class="btn-tinted" id="saveRoute">Route merken</button></div>
+
+  ${planFormHTML(p)}
+  <p class="group-label">NOTAM-Korridor</p>
+  <ul class="group"><li><label class="row"><span>Breite beidseits der Route</span><span class="inp"><input type="number" inputmode="decimal" data-p="corridor" value="${p.corridor}" step="1" min="1"> NM</span></label></li></ul>
+  <p class="group-note">Dieser Wert wird in Modul 3 für die NOTAM-Abfrage verwendet.</p>
+
+  <p class="group-label">Flugplatz-Infos (AIP)</p>
+  <div id="apinfoBox">${apInfoHTML()}</div>
+  <p class="group-note">Die AIP VFR der DFS ist kostenlos, ein automatisches Auslesen ist laut Berichten nicht erlaubt. Darum: Seite öffnen, Werte hier eintragen, Karte als Screenshot hinzufügen. Die Angaben bleiben auf diesem Gerät gespeichert und gelten für alle Flüge.</p>
+
+  <div class="btn-row"><button class="btn-fill" id="loadWx">Wetter laden & weiter ›</button></div>`;
+}
+function m1Mount() {
+  const save = (f) => store.set('flight', f);
+  const info = async () => {
+    const W = await wdata(); const f = flightIn();
+    const set = (key, id) => { const el = document.querySelector(`[data-info="${key}"]`); if (!el) return; const r = wxSource(W, (id || '').toUpperCase());
+      el.innerHTML = r ? `<span class="${r.bad ? 'bad' : ''}">${r.name ? `<b>${esc(r.name)}</b> · ` : ''}${esc(r.text)}</span>` : ''; };
+    set('from', f.from); set('to', f.to); set('alt', f.alt); f.via.forEach((v, k) => set('via-' + k, v));
+    return W;
+  };
+  const refreshAp = async () => { const W = await wdata(); const box = $('apinfoBox'); if (box) { box.innerHTML = apInfoHTML(); apInfoMount(W); } };
+  document.querySelectorAll('[data-f]').forEach((el) => {
+    el.addEventListener('input', () => {
+      el.value = el.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const f = flightIn();
+      if (el.dataset.f === 'via') f.via[+el.dataset.i] = el.value; else f[el.dataset.f] = el.value;
+      save(f); if (el.value.length === 4 || el.value.length === 0) { info(); refreshAp(); }
+    });
+  });
+  document.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', () => { const f = flightIn(); f.via.splice(+b.dataset.rm, 1); save(f); keepScroll(); }));
+  $('addVia').addEventListener('click', () => { const f = flightIn(); if (f.via.length >= 6) return; f.via.push(''); save(f); keepScroll(); });
+  document.querySelectorAll('[data-r]').forEach((b) => b.addEventListener('click', () => {
+    const r = store.get('routes', [])[b.dataset.r]; if (!r) return;
+    save({ from: r.ids[0] || '', via: r.ids.slice(1, -1), to: r.ids.length > 1 ? r.ids[r.ids.length - 1] : '', alt: r.alt || '' }); keepScroll();
+  }));
+  document.querySelectorAll('[data-rdel]').forEach((b) => b.addEventListener('click', () => {
+    const routes = store.get('routes', []); const r = routes[b.dataset.rdel];
+    if (r && confirm(`Route „${r.name}“ löschen?`)) { routes.splice(+b.dataset.rdel, 1); store.set('routes', routes); keepScroll(); }
+  }));
+  $('saveRoute').addEventListener('click', () => {
+    const f = flightIn(), ids = flightIds(f);
+    if (ids.length < 2) return alert('Bitte mindestens Start und Ziel eingeben.');
+    const name = prompt('Name der Route', ids.join(' – ')); if (!name?.trim()) return;
+    const routes = store.get('routes', []); routes.push({ name: name.trim(), ids, alt: /^[A-Z0-9]{4}$/.test(f.alt) ? f.alt : '' }); store.set('routes', routes); keepScroll();
+  });
+  planFormMount();
+  $('loadWx').addEventListener('click', () => {
+    const f = flightIn(), ids = flightIds(f), alt = /^[A-Z0-9]{4}$/.test(f.alt) ? f.alt : null;
+    if (!/^[A-Z0-9]{4}$/.test(f.from) || !/^[A-Z0-9]{4}$/.test(f.to)) return alert('Bitte Start und Ziel als ICAO-Kennung eingeben (4 Zeichen).');
+    const same = F && !F.demo && F.ids.join() === ids.join() && (F.altId || null) === alt && Date.now() - F.fetchedAt < 20 * 6e4;
+    location.hash = '#prep/wetter';
+    if (!same) loadFlight(ids, alt);
+  });
+  info().then((W) => apInfoMount(W));
+}
+
+// ---------- Modul 2: Wetter ----------
+function m2View() {
+  if (loading === 'flug') return `<div class="empty"><div class="spinner"></div><p>Lade METAR, TAF, Vorhersage und Streckenprofil …</p></div>`;
+  if (!weatherReady()) return needWeather();
+  const { s, p, all, ok, fp, win } = flightData();
+  const pc = B.profile && fp.legs.length ? profileCheck(fp, { ...s, alt: p.alt }) : null;
+  return `${routeLine()}${bannersHTML()}
+  <h2 class="sec">Wetter entlang des Flugs</h2>
+  ${alongHTML(all, fp, s, false)}
+  ${windowsHTML(win, p, true)}
+  ${B.profile && fp.legs.length ? profileCardHTML(fp, s, p, pc) : ''}
+  <h2 class="sec">48 Stunden</h2>
+  <div class="card">${ok.length ? timelineHTML(ok, fp) : ''}
+    <div class="legend"><span><i class="cat-VFR"></i>VFR</span><span><i class="cat-MVFR"></i>MVFR</span><span><i class="cat-IFR"></i>IFR</span><span><i class="cat-LIFR"></i>LIFR</span>
+    <span><i class="lg-below"></i>unter Minima</span><span><i class="lg-tempo2"></i>TEMPO unter Minima</span><span>● = deine Zeit am Platz</span></div>
+  </div>
+  <div class="card pick">
+    <input type="range" id="slider" min="0" max="${SPAN - 1}" step="1" value="${sel}" aria-label="Stunde wählen">
+    <div id="detail">${ok.length ? detailHTML(ok) : ''}</div>
+  </div>
+  <h2 class="sec">Plätze im Detail</h2>
+  ${all.map(({ ap, hours }) => airportCard(ap, hours, s, fp)).join('')}
+  ${modNav('wetter')}`;
+}
+function profileCardHTML(fp, s, p, pc) {
+  return `<h2 class="sec">Strecke</h2>
+  <section class="card ap">
+    <div class="ap-head"><div><h3>Streckenprofil</h3><div class="ap-name">Wolkenbasis und Gelände zur geplanten Überflugzeit</div></div>
+      ${pc ? `<span class="status ${pc.bad ? 'bad' : 'ok'}">${pc.gap === Infinity ? 'keine tiefen Wolken' : `min. ${Math.round(pc.gap / 100) * 100} ft über Grund`}</span>` : ''}</div>
+    ${profileSVG(fp, s, p)}
+    <div class="legend"><span><i class="lg-cloud"></i>Wolken (Modell)</span><span><i class="lg-terrain"></i>Gelände</span><span><i class="lg-taf"></i>Reiseflughöhe</span><span><i class="lg-below"></i>Abstand Wolken–Gelände unter Minimum</span></div>
+    ${pc && pc.gap !== Infinity ? `<p class="sun">Engste Stelle: ${Math.round(pc.d)} NM nach Abflug, ca. ${hhmm(pc.t)}Z – Basis ${Math.round(pc.cb / 100) * 100} ft MSL, Gelände ${Math.round(pc.terr / 100) * 100} ft.${pc.inCloud ? ' <span class="bad">Reiseflughöhe liegt dort zu nah an oder über der Wolkenbasis.</span>' : ''}</p>` : ''}
+    <p class="sun">Gelände entlang der direkten Linie (ohne Hindernisse), Wolkenbasis aus dem Modell – nur zur Orientierung.</p>
+  </section>`;
+}
+function m2Mount() {
+  $('reload')?.addEventListener('click', () => { if (B?.demo) { F = makeDemo(); route(); } else if (B) loadFlight(B.ids, B.altId); });
+  if (!weatherReady() || loading) return;
+  planFormMount();
+  const s = settings();
+  mountTimeControls(B.airports.filter((a) => !a.error).map((ap) => ({ ap, hours: computeHours(ap, B.start, s) })));
+}
+
+// ---------- Modul 3: NOTAM ----------
+const NOTAM_LINK = 'https://secais.dfs.de';
+function m3View() {
+  const f = flightIn(), ids = flightIds(f), p = plan(), n = store.get('notam', {});
+  if (ids.length < 2) return `<div class="empty"><h3>Noch keine Route</h3><p>Zuerst Modul 1 ausfüllen.</p><a class="btn-fill" href="#prep/flug">Zu Modul 1</a></div>`;
+  const key = ids.join(), valid = n.key === key;
+  const alt = /^[A-Z0-9]{4}$/.test(f.alt) ? f.alt : null;
+  const fp = weatherReady() ? flightPlan(depMs(p), p) : null;
+  const q = `${ids.join(' ')}${alt ? ' ' + alt : ''}`;
+  return `
+  <div class="card">
+    <div class="wc-title">Abfrage für diesen Flug</div>
+    <ul class="group inner">
+      <li><div class="row"><span>Route</span><span class="detail">${esc(ids.join(' → '))}</span></div></li>
+      ${alt ? `<li><div class="row"><span>Ausweichplatz</span><span class="detail">${esc(alt)}</span></div></li>` : ''}
+      <li><div class="row"><span>Korridor</span><span class="detail">${p.corridor} NM beidseits der Route</span></div></li>
+      <li><div class="row"><span>Zeitraum</span><span class="detail">${fp ? `${utc(fp.dep)} – ${hhmm(fp.altLeg ? fp.altLeg.arr : fp.end)}Z` : 'Abflugzeit in Modul 1/2 festlegen'}</span></div></li>
+      <li><div class="row"><span>Plätze</span><span class="detail">${esc(q)}</span><button class="btn-text" id="copyQ">Kopieren</button></div></li>
+    </ul>
+    <div class="btn-row"><a class="btn-fill" href="${NOTAM_LINK}" target="_blank" rel="noopener">DFS AIS-Portal öffnen ↗</a></div>
+    <p class="detail">Eine kostenlose, vollständige NOTAM-Schnittstelle für Deutschland gibt es nach meiner Recherche nicht. Deshalb fragst du die NOTAM im amtlichen DFS-Portal mit diesen Angaben ab (Streckenbriefing und Platz-NOTAM) und hängst das Ergebnis hier an.</p>
+  </div>
+  <p class="group-label">Ergebnis der Abfrage</p>
+  <div class="card">
+    ${filesBox('notam:' + key + ':', true)}
+    <label class="btn-tinted small upload">NOTAM-Briefing hinzufügen (PDF, Screenshot)<input type="file" accept="image/*,application/pdf" multiple data-up="notam:${esc(key)}:" hidden></label>
+    <label class="row col"><span>Relevante NOTAM / Notizen</span><textarea id="notamNotes" rows="4" placeholder="z. B. ED-R 123 aktiv 10–14Z, Kran 150 ft nahe EDQD">${esc(valid ? n.notes || '' : '')}</textarea></label>
+  </div>
+  <ul class="group gap"><li><label class="row check-row"><input type="checkbox" class="check" id="notamOk"${valid && n.checkedAt ? ' checked' : ''}><span>NOTAM für Route, Korridor und Zeitraum geprüft${valid && n.checkedAt ? ` <b>(${utc(n.checkedAt)})</b>` : ''}</span></label></li></ul>
+  ${n.key && !valid ? '<p class="banner">Die gespeicherte Prüfung gehört zu einer anderen Route.</p>' : ''}
+  ${modNav('notam')}`;
+}
+function m3Mount() {
+  const ids = flightIds(flightIn()); if (ids.length < 2) return;
+  const key = ids.join();
+  document.querySelectorAll('[data-up]').forEach((inp) => bindUpload(inp, inp.dataset.up));
+  fillFiles();
+  $('copyQ')?.addEventListener('click', async () => { const t = document.querySelector('#copyQ').previousElementSibling.textContent; try { await navigator.clipboard.writeText(t); $('copyQ').textContent = 'Kopiert ✓'; } catch { prompt('Zum Kopieren markieren:', t); } });
+  $('notamNotes').addEventListener('change', (e) => { const n = store.get('notam', {}); store.set('notam', { ...(n.key === key ? n : {}), key, notes: e.target.value }); });
+  $('notamOk').addEventListener('change', (e) => { const n = store.get('notam', {}); store.set('notam', { ...(n.key === key ? n : {}), key, notes: $('notamNotes').value, checkedAt: e.target.checked ? Date.now() : null }); keepScroll(); });
+}
+
+// ---------- Modul 4: Kraftstoff ----------
+function fuelTableHTML(fp, p, fc) {
+  const r = (a, b, c = '') => `<tr><td>${a}</td><td class="num">${b}</td><td class="detail">${c}</td></tr>`;
+  return `<div class="tbl-wrap"><table class="tbl fuel">
+    <tbody>
+    ${r('Rollen', `${fp.taxi.toFixed(1)} l`, `${p.taxi} l je Start`)}
+    ${r('Flug (Trip)', `${fp.trip.toFixed(1)} l`, `${fmtDur(fp.flight)} bei ${p.burn} l/h, inkl. Wind und Zuschlag`)}
+    ${fc.withAlt && fp.altLeg ? r('Zum Ausweichplatz', `${fc.alt.toFixed(1)} l`, `${fmtDur(fp.altLeg.min)} nach ${esc(fp.altLeg.to)}`) : ''}
+    ${fc.extraMin ? r('Zusatz', `${fc.extra.toFixed(1)} l`, `${fc.extraMin} min`) : ''}
+    ${r('Endreserve', `${fp.reserve.toFixed(1)} l`, `${p.reserve} min`)}
+    <tr class="sum"><td><b>Mindestens an Bord</b></td><td class="num"><b>${Math.ceil(fc.required)} l</b></td><td></td></tr>
+    </tbody></table></div>`;
+}
+function m4View() {
+  if (!weatherReady()) return needWeather();
+  B = F;
+  const p = plan(), fp = flightPlan(depMs(p), p), fc = fuelCalc(fp, p), T = wbType(p.ac);
+  return `${routeLine()}
+  <p class="group-label">Bedarf · ${esc(p.acData.name)} · ${p.burn} l/h · ${esc(p.acData.fuel)}</p>
+  <div class="card">${fuelTableHTML(fp, p, fc)}</div>
+  <ul class="group gap">
+    <li><label class="row"><span>Ausweichplatz einrechnen</span><input type="checkbox" class="switch" data-fu="withAlt"${fc.withAlt ? ' checked' : ''}${fp.altLeg ? '' : ' disabled'}></label></li>
+    <li><label class="row"><span>Zusätzliche Reserve</span><span class="inp"><input type="number" inputmode="decimal" data-fu="extraMin" value="${fc.extraMin}" step="5" min="0"> min</span></label></li>
+    <li><label class="row"><span>Kraftstoff an Bord vor dem Anlassen</span><span class="inp"><input type="number" inputmode="decimal" data-fu="onBoard" value="${fc.onBoard ?? ''}" step="1" min="0" placeholder="?"> l</span></label></li>
+  </ul>
+  <p class="group-note">Endreserve VFR am Tag üblicherweise 30 min (nachts 45 min) – Wert in Modul 1 anpassbar. Zeiten und Verbrauch kommen aus Modul 1, Gegen- oder Rückenwind aus der Höhenwind-Vorhersage (Modul 2). Ausweich-Kraftstoff ist für VFR nicht vorgeschrieben, aber empfehlenswert.</p>
+  ${fc.onBoard != null ? `<div class="card wincard ${fc.ok ? 'ok' : 'bad'}"><span class="wc-icon">${fc.ok ? SYM.ok : SYM.warn}</span>
+    <div><div class="wc-title">${fc.ok ? 'Kraftstoff reicht' : 'Zu wenig Kraftstoff'}</div>
+    <div class="wc-sub">${fc.onBoard} l an Bord · Bedarf ${Math.ceil(fc.required)} l · Flugdauer möglich ca. ${fmtDur(Math.max(0, fc.endurance))} · Landung mit ca. ${fc.landing.toFixed(0)} l</div></div></div>` : ''}
+  ${T.usableFuel ? '' : '<p class="group-note">Ausfliegbare Tankkapazität kannst du in Modul 5 beim Flugzeug hinterlegen.</p>'}
+  ${modNav('fuel')}`;
+}
+function m4Mount() {
+  document.querySelectorAll('[data-fu]').forEach((el) => el.addEventListener('change', () => {
+    const f = fuelIn(); const k = el.dataset.fu;
+    f[k] = el.type === 'checkbox' ? el.checked : el.value === '' ? null : Math.max(0, parseFloat(el.value) || 0);
+    store.set('fuel', f); keepScroll();
+  }));
+}
+
+// ---------- Modul 5: Masse & Schwerpunkt ----------
+let wbEdit = false;
+function wbTableHTML(wb) {
+  const { T } = wb, u = T.unit, au = T.armUnit;
+  const f = (v, d = 1) => (v == null ? '–' : (+v).toFixed(d));
+  const kgCol = (m) => (u === 'lb' && m != null ? ` <span class="detail">(${(m / LB).toFixed(0)} kg)</span>` : '');
+  const rows = wb.items.map((it) => `<tr><td>${esc(it.name)}${it.sample ? ' <span class="pill warn-pill">Beispiel</span>' : ''}</td><td class="num">${f(it.mass)} ${u}${kgCol(it.mass)}</td><td class="num">${f(it.arm, 2)}</td><td class="num">${it.mass && it.arm != null ? f(it.mass * it.arm, 0) : '–'}</td></tr>`).join('');
+  const fuelRow = (lab, m) => `<tr><td>${lab}</td><td class="num">${f(m)} ${u}${kgCol(m)}</td><td class="num">${f(T.fuelArm, 2)}</td><td class="num">${m && T.fuelArm != null ? f(m * T.fuelArm, 0) : '–'}</td></tr>`;
+  const res = (lab, r) => `<tr class="sum"><td><b>${lab}</b></td><td class="num"><b>${f(r.mass)} ${u}</b>${kgCol(r.mass)}${r.overMtow ? ' <span class="bad">> MTOW</span>' : ''}</td><td class="num"><b>${f(r.arm, 2)}</b></td><td class="num">${r.inEnv == null ? '–' : r.inEnv ? '<span class="ok-text">innerhalb</span>' : '<span class="bad">außerhalb</span>'}</td></tr>`;
+  return `<div class="tbl-wrap"><table class="tbl wb"><thead><tr><th>Posten</th><th>Masse</th><th>Hebelarm (${au})</th><th>Moment</th></tr></thead><tbody>
+    ${rows}${fuelRow('Kraftstoff beim Start', wb.fuelTo)}${res('Startmasse', wb.to)}${fuelRow('Kraftstoff bei Landung', wb.fuelLd)}${res('Landemasse', wb.ld)}
+  </tbody></table></div>`;
+}
+function m5View() {
+  if (!weatherReady()) return needWeather();
+  B = F;
+  const p = plan(), fp = flightPlan(depMs(p), p), fc = fuelCalc(fp, p), wb = wbCalc(p, fc), { T, W } = wb;
+  const kgIn = (k, label, val) => `<li><label class="row"><span>${label}</span><span class="inp"><input type="number" inputmode="decimal" data-wb="${k}" value="${val ?? ''}" step="1" min="0"> kg</span></label></li>`;
+  const typeEdit = wbEdit ? `
+    <ul class="group inner">
+      <li><label class="row"><span>Höchstabflugmasse (MTOW)</span><span class="inp"><input type="number" step="any" data-wt="mtow" value="${T.mtow ?? ''}"> ${T.unit}</span></label></li>
+      <li><label class="row"><span>Hebelarm Kraftstoff</span><span class="inp"><input type="number" step="any" data-wt="fuelArm" value="${T.fuelArm ?? ''}"> ${T.armUnit}</span></label></li>
+      <li><label class="row"><span>Kraftstoffdichte</span><span class="inp"><input type="number" step="0.01" data-wt="fuelDensity" value="${T.fuelDensity ?? ''}"> kg/l</span></label></li>
+      <li><label class="row"><span>Ausfliegbarer Kraftstoff</span><span class="inp"><input type="number" step="any" data-wt="usableFuel" value="${T.usableFuel ?? ''}"> l</span></label></li>
+      ${T.stations.map((s) => `<li><label class="row"><span>Hebelarm ${esc(s.name)}</span><span class="inp"><input type="number" step="any" data-wa="${s.k}" value="${s.arm ?? ''}"> ${T.armUnit}</span></label></li>`).join('')}
+      <li><label class="row col"><span>Schwerpunkt-Hüllkurve: je Zeile „Masse; Hebelarm“ (${T.unit}; ${T.armUnit}), Eckpunkte der Reihe nach</span>
+        <textarea id="envText" rows="6" placeholder="1950; 35.0">${T.env.map(([m, a]) => `${m}; ${a}`).join('\n')}</textarea></label></li>
+    </ul>
+    <div class="btn-row"><button class="btn-tinted" id="wbReset">Typwerte wiederherstellen</button><button class="btn-fill" id="wbSave">Speichern</button></div>` : `
+    <ul class="group inner">
+      <li><div class="row"><span>MTOW</span><span class="detail">${T.mtow ?? '–'} ${T.unit}</span></div></li>
+      <li><div class="row"><span>Hebelarm Kraftstoff</span><span class="detail">${T.fuelArm ?? '<span class="bad">fehlt</span>'} ${T.fuelArm != null ? T.armUnit : ''}</span></div></li>
+      ${T.stations.map((s) => `<li><div class="row"><span>Hebelarm ${esc(s.name)}</span><span class="detail">${s.arm ?? '<span class="bad">fehlt</span>'} ${s.arm != null ? T.armUnit : ''}</span></div></li>`).join('')}
+      <li><div class="row"><span>Hüllkurve</span><span class="detail">${T.env.length >= 3 ? `${T.env.length} Eckpunkte` : '<span class="bad">fehlt</span>'}</span></div></li>
+    </ul>
+    <div class="btn-row"><button class="btn-tinted" id="wbEditBtn">Typwerte bearbeiten</button></div>`;
+  return `
+  <p class="group-label">Flugzeug · ${esc(p.acData.name)}${T.edited ? ' · bearbeitet' : ''}</p>
+  <div class="card">
+    ${typeEdit}
+    <p class="detail"><b>Quellen:</b> ${T.src.map(esc).join(' · ')}</p>
+    <p class="detail">${esc(T.notes)}</p>
+  </div>
+  <p class="group-label">Leermasse deines Flugzeugs (Wägebericht)</p>
+  <ul class="group">
+    <li><label class="row"><span>Leermasse</span><span class="inp"><input type="number" step="any" data-wb="emptyMass" value="${W.emptyMass ?? ''}" placeholder="${T.sample?.mass ?? ''}"> ${T.unit}</span></label></li>
+    <li><label class="row"><span>Hebelarm Leermasse</span><span class="inp"><input type="number" step="any" data-wb="emptyArm" value="${W.emptyArm ?? ''}" placeholder="${T.sample?.arm ?? ''}"> ${T.armUnit}</span></label></li>
+  </ul>
+  ${wb.emptyIsSample ? `<p class="banner">Ohne eigene Werte rechnet die App mit einem Beispiel: ${esc(T.sample ? `${T.sample.mass ?? '–'} ${T.unit} / ${T.sample.arm ?? '–'} ${T.armUnit} – ${T.sample.src}` : 'keins vorhanden')}. Jedes Flugzeug ist anders – trage die Werte aus deinem Wägebericht ein.</p>` : ''}
+  <p class="group-label">Zuladung</p>
+  <ul class="group">
+    ${T.stations.map((s) => kgIn(s.k, esc(s.name), W[s.k])).join('')}
+    <li><div class="row"><span>Kraftstoff (aus Modul 4)</span><span class="detail">${fc.takeoff != null ? `${fc.takeoff.toFixed(0)} l beim Start · ${fc.landing.toFixed(0)} l bei Landung · Dichte ${T.fuelDensity} kg/l` : '<a href="#prep/fuel">in Modul 4 eintragen</a>'}</span></div></li>
+  </ul>
+  <p class="group-note">Personen und Gepäck in kg${T.unit === 'lb' ? ' – die App rechnet in lb um (1 kg = 2,20462 lb)' : ''}.</p>
+  <h2 class="sec">Ergebnis</h2>
+  ${wb.missing.length ? `<p class="banner">Für eine vollständige Rechnung fehlt noch: ${esc(wb.missing.join(', '))}.</p>` : ''}
+  <div class="card">${wbTableHTML(wb)}${envelopeSVG(wb)}</div>
+  ${modNav('wb')}`;
+}
+function m5Mount() {
+  if (!weatherReady()) return;
+  const ac = plan().ac;
+  document.querySelectorAll('[data-wb]').forEach((el) => el.addEventListener('change', () => { setWbFlight({ [el.dataset.wb]: el.value === '' ? null : parseFloat(el.value) }); keepScroll(); }));
+  $('wbEditBtn')?.addEventListener('click', () => { wbEdit = true; keepScroll(); });
+  $('wbReset')?.addEventListener('click', () => { if (!confirm('Eigene Typwerte verwerfen und Quellwerte wiederherstellen?')) return; const all = store.get('wbTypes', {}); delete all[ac]; store.set('wbTypes', all); wbEdit = false; keepScroll(); });
+  $('wbSave')?.addEventListener('click', () => {
+    const all = store.get('wbTypes', {}), o = all[ac] || {};
+    document.querySelectorAll('[data-wt]').forEach((el) => { o[el.dataset.wt] = el.value === '' ? null : parseFloat(el.value); });
+    o.arms = o.arms || {};
+    document.querySelectorAll('[data-wa]').forEach((el) => { o.arms[el.dataset.wa] = el.value === '' ? null : parseFloat(el.value); });
+    const env = $('envText').value.split('\n').map((l) => l.split(/[;\t]+|\s{2,}/).map((x) => parseFloat(x.replace(',', '.')))).filter((x) => x.length >= 2 && !isNaN(x[0]) && !isNaN(x[1])).map((x) => [x[0], x[1]]);
+    o.env = env;
+    all[ac] = o; store.set('wbTypes', all); wbEdit = false; keepScroll();
+  });
+}
+
+// ---------- Modul 6: Checkliste ----------
+function m6View() {
+  const f = flightIn();
+  const p = plan();
+  const fp = weatherReady() ? (B = F, flightPlan(depMs(p), p)) : null;
+  return `${f.alt ? `<p class="meta">Ausweichplatz: <b>${esc(f.alt)}</b>${fp?.altLeg ? ` · ${Math.round(fp.altLeg.dist)} NM ab Ziel, ${fmtDur(fp.altLeg.min)}` : ''}</p>` : '<p class="banner">Kein Ausweichplatz festgelegt – in Modul 1 eintragen.</p>'}
+  ${CHECKS_HTML(fp)}
+  ${modNav('check')}`;
+}
+function m6Mount() {
+  document.querySelectorAll('[data-c]').forEach((el) => el.addEventListener('change', () => { const c = checks(); c[el.dataset.c] = el.checked; store.set('checks', c); }));
+  $('ckReset')?.addEventListener('click', () => { store.set('checks', {}); keepScroll(); });
+}
+
+// ---------- Gesamtes Briefing ----------
+function briefingAllView() {
+  if (loading === 'flug') return `<div class="empty"><div class="spinner"></div><p>Lade Wetter …</p></div>`;
+  if (!weatherReady()) return needWeather();
+  const { s, p, all, ok, fp, win } = flightData();
+  const f = flightIn(), n = store.get('notam', {}), notamOk = n.key === flightIds(f).join() && n.checkedAt;
+  const fc = fuelCalc(fp, p), wb = wbCalc(p, fc);
+  const pc = B.profile && fp.legs.length ? profileCheck(fp, { ...s, alt: p.alt }) : null;
+  const routeTxt = B.ids.join(' → ') + (B.altId ? ` (Ausweich ${B.altId})` : '');
+  const status = MODULES.map((m) => ({ m, st: moduleStatus(m.id) }));
+  const apIds = [...B.ids, ...(B.altId ? [B.altId] : [])];
+  return `
+  <div class="print-only print-head">
+    <h1>FlightPrep – Flugvorbereitung</h1>
+    <p><b>${esc(routeTxt)}</b> · ${esc(p.acData.name)} · TAS ${p.tas} kt · ${p.burn} l/h · ${p.alt} ft</p>
+    <p>Export: <span id="exportTime"></span> · Wetter abgerufen: ${utc(B.fetchedAt)}${B.dataAt ? ` (METAR/TAF-Stand ${hhmm(B.dataAt)}Z)` : ''} · Minima: ${s.minCeil} ft / ${s.minVis} km / Wind ${s.maxWind} kt, Böen ${s.maxGust} kt</p>
+  </div>
+  <div class="noprint">${routeLine()}</div>${bannersHTML()}
+  <h2 class="sec">Übersicht</h2>
+  <ul class="group modules">${status.map(({ m, st }) => `<li><div class="row mod"><span class="mod-n ${st.ok ? 'ok' : st.warn ? 'warn' : ''}">${st.ok ? '✓' : m.n}</span><span class="mod-main"><b>${m.title}</b><span>${esc(st.text)}</span></span></div></li>`).join('')}</ul>
+
+  <h2 class="sec">1 · Flug</h2>
+  <div class="card plancard"><span class="wc-icon">${ICONS.plane}</span>
+    <div class="pc-main"><div class="wc-title">${esc(p.acData.name)} · Abflug ${dayLabel(fp.dep)} ${hhmm(fp.dep)}Z · Ankunft ${hhmm(fp.end)}Z</div>
+    <div class="wc-sub">${Math.round(fp.dist)} NM · ${fmtDur(fp.flight)} · Reiseflughöhe ${p.alt} ft</div></div></div>
+  <div class="card">${planDetailsHTML(fp, p)}</div>
+  ${apIds.map((id) => { const i = apInfo(id); return `<div class="card apbrief"><div class="ap-head"><div><h3>${esc(id)}</h3><div class="ap-name">${esc(B.airports.find((a) => a.id === id)?.name || '')}</div></div></div>
+    <p>Öffnungszeit: <b>${esc(hoursText(id))}</b> · PPR: <b>${i.ppr ? 'ja' : 'nein'}</b>${i.checkedAt ? ` · eingetragen ${utc(i.checkedAt)}` : ' · <span class="bad">nicht eingetragen</span>'}</p>
+    ${i.notes ? `<p>${esc(i.notes)}</p>` : ''}${filesBox(`chart:${id}:`, false)}</div>`; }).join('')}
+
+  <h2 class="sec">2 · Wetter</h2>
+  ${alongHTML(all, fp, s, false)}
+  ${windowsHTML(win, p, false)}
+  ${B.profile && fp.legs.length ? profileCardHTML(fp, s, p, pc) : ''}
+  <div class="card">${ok.length ? timelineHTML(ok, fp) : ''}</div>
+  ${all.map(({ ap, hours }) => airportCard(ap, hours, s, fp)).join('')}
+
+  <h2 class="sec">3 · NOTAM</h2>
+  <div class="card"><p>${notamOk ? `Geprüft am <b>${utc(n.checkedAt)}</b> · Korridor ${p.corridor} NM` : '<span class="bad">Nicht als geprüft markiert.</span>'}</p>
+    ${n.key === flightIds(f).join() && n.notes ? `<p>${esc(n.notes)}</p>` : ''}${filesBox('notam:' + flightIds(f).join() + ':', false)}</div>
+
+  <h2 class="sec">4 · Kraftstoff</h2>
+  <div class="card">${fuelTableHTML(fp, p, fc)}<p>${fc.onBoard != null ? `An Bord: <b>${fc.onBoard} l</b> – ${fc.ok ? 'ausreichend' : '<span class="bad">nicht ausreichend</span>'}` : '<span class="bad">Kraftstoff an Bord nicht eingetragen.</span>'}</p></div>
+
+  <h2 class="sec">5 · Masse & Schwerpunkt</h2>
+  <div class="card">${wb.missing.length ? `<p class="bad">Unvollständig: ${esc(wb.missing.join(', '))}</p>` : ''}${wb.emptyIsSample ? '<p class="bad">Gerechnet mit Beispiel-Leermasse, nicht mit dem Wägebericht dieses Flugzeugs.</p>' : ''}${wbTableHTML(wb)}${envelopeSVG(wb)}
+    <p class="detail">Quellen Typdaten: ${wb.T.src.map(esc).join(' · ')}${wb.T.edited ? ' · vom Nutzer bearbeitet' : ''}</p></div>
+
+  <h2 class="sec">6 · Checkliste</h2>
+  ${CHECKS_HTML(fp)}
+
+  <button class="btn-fill big noprint" id="pdfBig">${SYM.share} Briefing als PDF sichern</button>
+  <p class="foot">Quellen: METAR/TAF aviationweather.gov (NOAA), Flugplätze OurAirports, Modell und Gelände Open-Meteo (u. a. DWD ICON); Flugplatz-Infos, Karten und NOTAM vom Nutzer aus AIP VFR und DFS AIS-Portal übernommen. Keine amtliche Flugwetterberatung oder Flugvorbereitung – vor dem Flug amtliche Quellen und Flughandbuch prüfen.</p>`;
+}
+function briefingAllMount() {
+  $('pdfBig')?.addEventListener('click', exportPDF);
+  $('pdf')?.addEventListener('click', exportPDF);
+  $('reload')?.addEventListener('click', () => { if (B?.demo) { F = makeDemo(); route(); } else if (B) loadFlight(B.ids, B.altId); });
+  document.querySelectorAll('[data-c]').forEach((el) => el.addEventListener('change', () => { const c = checks(); c[el.dataset.c] = el.checked; store.set('checks', c); }));
+  $('ckReset')?.addEventListener('click', () => { store.set('checks', {}); keepScroll(); });
+  fillFiles();
+  if (!weatherReady() || loading) return;
+}
+
+const PREP = {
+  '': { title: 'FlightPrep', view: overviewView },
+  flug: { title: '1 · Flug', view: m1View, mount: m1Mount },
+  wetter: { title: '2 · Wetter', view: m2View, mount: m2Mount, actions: () => weatherReady() && !loading ? BTN('reload', 'Aktualisieren', SYM.reload) : '' },
+  notam: { title: '3 · NOTAM', view: m3View, mount: m3Mount },
+  fuel: { title: '4 · Kraftstoff', view: m4View, mount: m4Mount },
+  wb: { title: '5 · Masse & Schwerpunkt', view: m5View, mount: m5Mount },
+  check: { title: '6 · Checkliste', view: m6View, mount: m6Mount },
+  briefing: { title: 'Briefing', view: briefingAllView, mount: briefingAllMount, actions: () => weatherReady() && !loading ? BTN('reload', 'Aktualisieren', SYM.reload) + BTN('pdf', 'Als PDF sichern', SYM.share) : '' },
+};
+
 // ---------- Bereiche = Menüpunkte ----------
 const BTN = (id, label, sym) => `<button class="btn-text sym" id="${id}" aria-label="${label}" title="${label}">${sym}</button>`;
 const SECTIONS = [
   {
+    id: 'prep', title: 'FlightPrep', icon: ICONS.plane, data: () => F,
+    actions: (sub) => (PREP[sub || ''] || PREP['']).actions?.() || '',
+    render: (sub) => (PREP[sub || ''] || PREP['']).view(),
+    mount: (sub) => (PREP[sub || ''] || PREP['']).mount?.(),
+  },
+  {
     id: 'wetter', title: 'Wetter', icon: ICONS.cloud, data: () => V,
     actions: () => V && !loading ? BTN('reload', 'Aktualisieren', SYM.reload) : '',
     render: wetterView, mount: wetterMount,
-  },
-  {
-    id: 'flug', title: 'Flug', icon: ICONS.plane, data: () => F,
-    actions: (sub) => +sub === 3 && F && !loading ? BTN('reload', 'Aktualisieren', SYM.reload) + BTN('save', 'Route merken', SYM.bookmark) + BTN('pdf', 'Als PDF sichern', SYM.share) : '',
-    render: flugView, mount: flugMount,
   },
   {
     id: 'einstellungen', title: 'Einstellungen', icon: ICONS.gear, data: () => F,
@@ -1331,7 +1822,7 @@ const SECTIONS = [
         if (!/^[A-Z0-9]{4}$/i.test(id) || isNaN(+lat) || isNaN(+lon)) return alert('Bitte im Format „EDXY 49.123 8.456 Name" eingeben.');
         const c = store.get('coords', {}); c[id.toUpperCase()] = { lat: +lat, lon: +lon, name: name.join(' ') }; store.set('coords', c); route();
       });
-      $('demo').addEventListener('click', () => { useDemo(); location.hash = '#flug/3'; });
+      $('demo').addEventListener('click', () => { useDemo(); location.hash = '#prep/briefing'; });
       $('reset').addEventListener('click', () => {
         if (confirm('Alle Daten löschen? Das lässt sich nicht rückgängig machen.')) { localStorage.clear(); F = null; V = null; route(); }
       });
@@ -1352,23 +1843,24 @@ $('nav').innerHTML = SECTIONS.map((s) =>
 function route() {
   let [id, sub] = location.hash.slice(1).split('/');
   // alte Adressen weiterleiten
-  if (id === 'briefing') { location.replace(F ? '#flug/3' : '#flug/1'); return; }
-  if (id === 'routen') { location.replace('#flug/1'); return; }
+  if (id === 'briefing') { location.replace('#prep/briefing'); return; }
+  if (id === 'routen') { location.replace('#prep/flug'); return; }
+  if (id === 'flug') { location.replace(['', '#prep/flug', '#prep/wetter', '#prep/briefing'][+sub || 1] || '#prep/flug'); return; }
   const section = SECTIONS.find((s) => s.id === id) || SECTIONS[0];
   B = section.data();
   document.querySelectorAll('#nav a').forEach((a) => {
     if (a.dataset.id === section.id) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
-    if (a.dataset.id === 'flug') a.setAttribute('href', '#flug' + (F ? '/' + (store.get('flugStep', 1)) : ''));
   });
-  if (section.id === 'flug') store.set('flugStep', Math.max(1, Math.min(3, +sub || 1)));
-  $('back').hidden = true;
-  $('largeTitle').textContent = section.title;
-  $('barTitle').textContent = section.title;
+  const title = section.id === 'prep' ? (PREP[sub || ''] || PREP['']).title : section.title;
+  $('back').hidden = !(section.id === 'prep' && sub);
+  $('back').onclick = () => { location.hash = '#prep'; };
+  $('largeTitle').textContent = title;
+  $('barTitle').textContent = title;
   $('barActions').innerHTML = section.actions?.(sub) || '';
   $('view').innerHTML = section.render(sub);
   $('view').dataset.section = section.id;
   $('scroll').scrollTop = 0;
-  document.title = `${section.title} – Ceiling`;
+  document.title = `${title} – FlightPrep`;
   section.mount?.(sub);
 }
 
