@@ -323,10 +323,11 @@ async function fetchSet(ids, altId, withProfile) {
   else if (W.status.errors?.length) errors.push('Wetterquelle: ' + W.status.errors.join(' · '));
   const coords = store.get('coords', {});
   const alt = altId && !ids.includes(altId) ? altId : null;
-  const list = alt ? [...ids, alt] : ids;
+  const uniq = [...new Set(ids)];
+  const list = alt ? [...uniq, alt] : uniq;
 
   const airports = await Promise.all(list.map(async (id, k) => {
-    const isAlt = !!alt && k === ids.length;
+    const isAlt = !!alt && k === uniq.length;
     const m = W.metar.find((x) => x.icaoId === id), t = W.taf.find((x) => x.icaoId === id);
     const a = W.airports[id], c = coords[id];
     const src = c || (a && { lat: a[1], lon: a[2] }) || m || t;
@@ -353,7 +354,7 @@ async function fetchSet(ids, altId, withProfile) {
   }));
 
   const start = Math.floor(Date.now() / H) * H;
-  const route = airports.filter((a) => !a.error && !a.isAlt);
+  const route = ids.map((id) => airports.find((a) => a.id === id && !a.isAlt)).filter((a) => a && !a.error);
   let profile = null;
   if (withProfile && route.length > 1) profile = await loadProfile(route, start).catch((e) => { errors.push('Streckenprofil: ' + e.message); return null; });
   return { fetchedAt: Date.now(), dataAt: W.status?.fetchedAt ? W.status.fetchedAt * 1000 : null, start, ids, altId: alt, airports, errors, demo: false, profile };
@@ -421,7 +422,7 @@ function chartSVG(ap, hours, s, eta) {
     if (hz === 0) g += `<line class="ch-day" x1="${x(i)}" x2="${x(i)}" y1="${T - 18}" y2="${T + PH}"/><text class="ch-label ch-strong" x="${x(i) + 6}" y="${T - 8}">${dayLabel(t)}</text>`;
     if (i % 3 === 0) g += `<text class="ch-label" x="${x(i)}" y="${aY}" text-anchor="middle">${p2(hz)}</text>`;
   }
-  if (new Date(B.start).getUTCHours() > 2) g += `<text class="ch-label ch-strong" x="${L}" y="${T - 8}">${dayLabel(B.start)}</text>`;
+  if (new Date(B.start).getUTCHours() > 2 && 24 - new Date(B.start).getUTCHours() >= 5) g += `<text class="ch-label ch-strong" x="${L}" y="${T - 8}">${dayLabel(B.start)}</text>`;
   g += `<text class="ch-label" x="${W - R}" y="${aY}" text-anchor="end">UTC</text>`;
 
   // Modell: weiche Fläche
@@ -454,10 +455,11 @@ function chartSVG(ap, hours, s, eta) {
   if (nowI >= 0 && nowI <= SPAN) {
     g += `<line class="ch-now" x1="${x(nowI)}" x2="${x(nowI)}" y1="${T}" y2="${y(0)}"/>`;
   }
-  if (eta && eta.t >= B.start && eta.t <= B.start + SPAN * H) {
-    const ex = x((eta.t - B.start) / H), lab = eta.kind === 'Abflug' ? 'ETD' : 'ETA';
-    g += `<line class="ch-eta" x1="${ex}" x2="${ex}" y1="${T}" y2="${y(0)}"/><rect class="ch-etapill" x="${ex - 22}" y="${T + 4}" width="44" height="20" rx="10"/><text class="ch-etalabel" x="${ex}" y="${T + 18}" text-anchor="middle">${lab}</text>`;
-  }
+  ptMarks(eta || []).forEach(({ t, lab }, n) => {
+    if (t < B.start || t > B.start + SPAN * H) return;
+    const ex = x((t - B.start) / H), py = T + 4 + (n % 2) * 24;
+    g += `<line class="ch-eta" x1="${ex}" x2="${ex}" y1="${T}" y2="${y(0)}"/><rect class="ch-etapill" x="${ex - 22}" y="${py}" width="44" height="20" rx="10"/><text class="ch-etalabel" x="${ex}" y="${py + 14}" text-anchor="middle">${lab}</text>`;
+  });
   const mc = ceilOf(ap.metar?.clouds), mt = toMs(ap.metar?.obsTime);
   if (mc !== undefined && mt && mt > B.start - 2 * H) g += `<circle class="ch-metar" cx="${Math.max(L, x((mt - B.start) / H))}" cy="${y(mc)}" r="7"/>`;
 
@@ -483,7 +485,7 @@ function chartSVG(ap, hours, s, eta) {
 // Zeitleiste der Route: eine Zeile pro Platz, Farbbänder je Kategorie
 function timelineHTML(all, fp) {
   const cells = (hours, cls, label, ei) => `<div class="tl-row">${runs(hours, (h) => cls(h)).map((r) =>
-    hours.slice(r.a, r.b).map((h, k) => `<button class="tl-c ${cls(h)}${k === 0 ? ' rs' : ''}${k === r.b - r.a - 1 ? ' re' : ''}${h.i === ei ? ' eta' : ''} st-${h.status || 'x'}" data-i="${h.i}" aria-label="${esc(label)} ${utc(h.t)}"></button>`).join('')).join('')}</div>`;
+    hours.slice(r.a, r.b).map((h, k) => `<button class="tl-c ${cls(h)}${k === 0 ? ' rs' : ''}${k === r.b - r.a - 1 ? ' re' : ''}${ei && ei.has(h.i) ? ' eta' : ''} st-${h.status || 'x'}" data-i="${h.i}" aria-label="${esc(label)} ${utc(h.t)}"></button>`).join('')).join('')}</div>`;
   let head = '<div class="tl-name"></div><div class="tl-row tl-head">';
   for (let i = 0; i < SPAN; i++) {
     const t = B.start + i * H, hz = new Date(t).getUTCHours();
@@ -495,7 +497,7 @@ function timelineHTML(all, fp) {
   const lr = `<div class="tl-name tl-sub">Licht</div><div class="tl-row tl-light">${runs(lightRow, (h) => h.l).map((r) =>
     `<span class="l-${r.k}" style="flex:${r.b - r.a}"></span>`).join('')}</div>`;
   return `<div class="timeline">${head}${lr}${all.map(({ ap, hours }) =>
-    `<div class="tl-name">${esc(ap.id)}</div>${cells(hours, (h) => 'cat-' + (h.cat || 'none'), ap.id, fp?.eta[ap.id] ? hourOf(fp.eta[ap.id].t) : null)}`).join('')}</div>`;
+    `<div class="tl-name">${esc(ap.id)}</div>${cells(hours, (h) => 'cat-' + (h.cat || 'none'), ap.id, new Set(ptMarks(ptsFor(fp, ap.id)).map((m) => hourOf(m.t)).filter((v) => v != null)))}`).join('')}</div>`;
 }
 
 // Zeitfenster, in denen alle Plätze über den Minima liegen und Tag ist
@@ -551,9 +553,9 @@ function tilesHTML(all, fp) {
       <div class="t-sub">Ceiling jetzt · ${src}</div>
       <div class="t-meta">${fmtWind(m || h0.wind)} · ${fmtVis(vis)}</div>
       <div class="t-trend ${h0.status === 'none' ? 'none' : good ? 'ok' : 'bad'}"><i></i>${trend}</div>
-      ${(() => { const e = fp?.eta[ap.id]; if (!e) return ''; const i = hourOf(e.t); const h = i == null ? null : hours[i];
+      ${ptsFor(fp, ap.id).map((e) => { const i = hourOf(e.t); const h = i == null ? null : hours[i];
         const st = !h ? 'außerhalb 48 h' : statusText(h);
-        return `<div class="t-eta ${h && h.status === 'ok' ? 'ok' : 'bad'}">${e.kind} ${hhmm(e.t)}Z · ${st}${h?.src ? ` (${h.src})` : ''}</div>`; })()}
+        return `<div class="t-eta ${h && h.status === 'ok' ? 'ok' : 'bad'}">${KIND[e.kind]} ${ptLabel(e)} · ${st}${h?.src ? ` (${h.src})` : ''}</div>`; }).join('')}
     </button>`;
   }).join('')}</div>`;
 }
@@ -582,7 +584,7 @@ function airportCard(ap, hours, s, fp) {
       <div><h3>${esc(ap.id)}</h3><div class="ap-name">${ap.isAlt ? 'Ausweichplatz · ' : ''}${esc(ap.name)}</div></div>
       ${hours.every((h) => h.status === 'none') ? '<span class="status none">keine Daten</span>' : `<span class="status ${below ? 'bad' : 'ok'}">${below ? `${below} h nicht fliegbar` : 'fliegbar'}</span>`}
     </div>
-    ${chartSVG(ap, hours, s, fp?.eta[ap.id])}
+    ${chartSVG(ap, hours, s, ptsFor(fp, ap.id))}
     <div class="legend">
       <span><i class="lg-taf"></i>${esc(src)}</span><span><i class="lg-tempo"></i>TEMPO/PROB</span>
       <span><i class="lg-model"></i>Modell (Schätzung)</span><span><i class="lg-metar"></i>METAR</span>
@@ -649,24 +651,35 @@ function makeLeg(a, b, t, p) {
 }
 
 function flightPlan(dep, p) {
-  const aps = (B?.airports || []).filter((a) => !a.error && !a.isAlt);
-  const altAp = (B?.airports || []).find((a) => a.isAlt && !a.error);
-  const legs = []; let t = dep;
+  const list = (B?.airports || []).filter((a) => !a.error);
+  const aps = (B?.ids || []).map((id) => list.find((a) => a.id === id && !a.isAlt)).filter(Boolean);
+  const altAp = list.find((a) => a.isAlt);
+  // Aufenthalte passend zu den gültigen Zwischenlandungen (leere Felder zählen nicht)
+  const fi = flightIn();
+  const stays = fi.via.map((v, k) => [v, (fi.stays || [])[k]]).filter(([v]) => /^[A-Z0-9]{4}$/.test((v || '').trim().toUpperCase())).map(([, st]) => st);
+  const legs = [], points = []; let t = dep;
+  if (aps[0]) points.push({ k: 0, id: aps[0].id, kind: 'Abflug', t: dep, etd: dep, stay: 0 });
   for (let k = 0; k < aps.length - 1; k++) {
-    const l = makeLeg(aps[k], aps[k + 1], t, p);
+    const l = makeLeg(aps[k], aps[k + 1], t, p), last = k === aps.length - 2;
+    const stay = last ? 0 : Math.max(0, +stays[k] || 0);
     legs.push(l);
-    t = l.arr + (k < aps.length - 2 ? p.stop * 6e4 : 0);
+    points.push({ k: k + 1, id: l.to, kind: last ? 'Ankunft' : 'Zwischenlandung', t: l.arr, etd: last ? null : l.arr + stay * 6e4, stay, leg: l });
+    t = l.arr + stay * 6e4;
   }
-  const eta = {}; if (aps[0]) eta[aps[0].id] = { t: dep, kind: 'Abflug' };
-  legs.forEach((l, k) => { eta[l.to] = { t: l.arr, kind: k < legs.length - 1 ? (p.stop > 0 ? 'Zwischenlandung' : 'Überflug') : 'Ankunft' }; });
   const end = legs.length ? legs[legs.length - 1].arr : dep;
   // Ausweichplatz: ab dem Ziel weiterfliegen (Kraftstoff nur zur Information)
   let altLeg = null;
-  if (altAp && aps.length) { altLeg = makeLeg(aps[aps.length - 1], altAp, end, p); eta[altAp.id] = { t: altLeg.arr, kind: 'Ausweich' }; }
+  if (altAp && aps.length) { altLeg = makeLeg(aps[aps.length - 1], altAp, end, p); points.push({ k: 'alt', id: altAp.id, kind: 'Ausweich', t: altLeg.arr, stay: 0, leg: altLeg }); }
   const flight = legs.reduce((s, l) => s + l.min, 0), trip = legs.reduce((s, l) => s + l.fuel, 0);
-  const reserve = (p.reserve / 60) * p.burn, taxi = p.taxi * (p.stop > 0 ? Math.max(1, legs.length) : 1);
-  return { dep, legs, altLeg, eta, flight, dist: legs.reduce((s, l) => s + l.dist, 0), trip, reserve, taxi, total: trip + reserve + taxi, end };
+  const starts = 1 + points.filter((pt) => pt.kind === 'Zwischenlandung' && pt.stay > 0).length;
+  const reserve = (p.reserve / 60) * p.burn, taxi = aps.length > 1 ? p.taxi * starts : 0;
+  return { dep, legs, altLeg, points, flight, dist: legs.reduce((s, l) => s + l.dist, 0), trip, reserve, taxi, total: trip + reserve + taxi, end };
 }
+// Markierungen für einen Platz (ein Platz kann mehrfach vorkommen, z. B. Rundflug)
+const ptsFor = (fp, id) => (fp ? fp.points.filter((pt) => pt.id === id) : []);
+const ptMarks = (pts) => pts.flatMap((pt) => pt.kind === 'Abflug' ? [{ t: pt.t, lab: 'ETD' }] : [{ t: pt.t, lab: 'ETA' }, ...(pt.stay > 0 ? [{ t: pt.etd, lab: 'ETD' }] : [])]);
+const ptLabel = (pt) => pt.kind === 'Abflug' ? `ETD ${hhmm(pt.t)}Z` : `ETA ${hhmm(pt.t)}Z${pt.stay > 0 ? ` · ETD ${hhmm(pt.etd)}Z` : ''}`;
+const KIND = { Abflug: 'Abflug', Zwischenlandung: 'Zwischenlandung', Ankunft: 'Ankunft', Ausweich: 'Ausweichplatz' };
 const hourOf = (t) => { const i = Math.floor((t - B.start) / H); return i >= 0 && i < SPAN ? i : null; };
 
 // Zeitpunkt, an dem man eine Stelle der Strecke (in NM) erreicht
@@ -706,7 +719,7 @@ function depWindows(all, p, s) {
     const dep = B.start + d * H + mm * 6e4;
     if (d < SPAN && dep >= Date.now() - H) {
       const fp = flightPlan(dep, p);
-      ok = Object.entries(fp.eta).filter(([, e]) => e.kind !== 'Ausweich').every(([id, e]) => { const i = hourOf(e.t), hs = byId[id]; return i != null && hs && hs[i].status === 'ok' && (typeof isOpen !== 'function' || isOpen(apById[id], e.t) !== false); });
+      ok = fp.points.filter((pt) => pt.kind !== 'Ausweich').flatMap((pt) => [[pt.id, pt.t], ...(pt.stay > 0 ? [[pt.id, pt.etd]] : [])]).every(([id, tt]) => { const e = { t: tt }; const i = hourOf(e.t), hs = byId[id]; return i != null && hs && hs[i].status === 'ok' && (typeof isOpen !== 'function' || isOpen(apById[id], e.t) !== false); });
       if (ok && B.profile) { const pc = profileCheck(fp, { ...s, alt: p.alt }); ok = !pc?.bad; }
     }
     if (ok && a == null) a = dep;
@@ -769,7 +782,7 @@ function profileSVG(fp, s, p) {
   g += `<line class="pr-alt" x1="${L}" x2="${W - R}" y1="${y(p.alt)}" y2="${y(p.alt)}"/><text class="pr-altlabel" x="${L + 8}" y="${y(p.alt) - 7}">Reiseflughöhe ${p.alt} ft</text>`;
   // Plätze
   P.marks.forEach((mk, k) => {
-    const e = fp.eta[mk.id], anchor = k === 0 ? 'start' : k === P.marks.length - 1 ? 'end' : 'middle';
+    const e = fp.points.find((pt) => pt.k === k), anchor = k === 0 ? 'start' : k === P.marks.length - 1 ? 'end' : 'middle';
     g += `<line class="ch-day" x1="${x(mk.d)}" x2="${x(mk.d)}" y1="${T}" y2="${y(0)}"/>
       <text class="ch-label ch-strong" x="${x(mk.d)}" y="${y(0) + 20}" text-anchor="${anchor}">${esc(mk.id)}</text>
       <text class="ch-label" x="${x(mk.d)}" y="${y(0) + 37}" text-anchor="${anchor}">${e ? hhmm(e.t) + 'Z' : ''} · ${Math.round(mk.d)} NM</text>`;
@@ -871,30 +884,34 @@ const statusCls = (e) => e.status === 'ok' ? 'ok' : e.status === 'none' ? 'none'
 // Chronologische Liste: Abflug, Zwischenplätze, Ziel, Ausweichplatz
 function alongHTML(all, fp, s, compact) {
   const byId = Object.fromEntries(all.map((x) => [x.ap.id, x]));
-  const order = [...B.ids, ...(B.altId ? [B.altId] : [])];
-  const legTo = Object.fromEntries([...fp.legs, ...(fp.altLeg ? [fp.altLeg] : [])].map((l) => [l.to, l]));
-  return `<div class="along">${order.map((id) => {
-    const x = byId[id], e = fp.eta[id];
+  const row = (pt) => {
+    const x = byId[pt.id], id = pt.id, l = pt.leg;
     if (!x) return '';
     const { ap, hours } = x;
-    const l = legTo[id];
     const leg = l ? `<div class="al-leg">${Math.round(l.dist)} NM · ${fmtDur(l.min)} · GS ${Math.round(l.gs)} kt${ap.isAlt ? ' · ab Ziel' : ''}</div>` : '';
-    if (ap.error || !hours || !e) return `${leg}<div class="al-row al-bad"><div class="al-time"><b>–</b></div><div class="al-dot"></div><div class="al-main"><div class="al-head"><b>${esc(id)}</b></div><div class="warn">${esc(ap.error || 'Keine Zeit berechnet')}</div></div></div>`;
-    const v = evalAt(ap, hours, e.t, s);
-    const open = typeof isOpen === 'function' ? isOpen(ap, e.t) : null, info = typeof apInfo === 'function' ? apInfo(id) : null;
-    const opl = info ? `<div class="al-src">Öffnungszeit: ${esc(hoursText(id))}${open === false ? ' – <b class="bad">zu dieser Zeit geschlossen</b>' : open === null ? ' – nicht geprüft' : ''}${info.ppr ? ' · <b>PPR</b>' : ''}</div>` : '';
+    if (ap.error || !hours) return `${leg}<div class="al-row al-bad"><div class="al-time"><b>–</b></div><div class="al-dot"></div><div class="al-main"><div class="al-head"><b>${esc(id)}</b></div><div class="warn">${esc(ap.error || 'keine Daten')}</div></div></div>`;
+    const v = evalAt(ap, hours, pt.t, s);
+    // Bei Aufenthalt auch zum Weiterflug (ETD) prüfen
+    const v2 = pt.stay > 0 ? evalAt(ap, hours, pt.etd, s) : null;
+    const worst = v2 && statusCls(v2) === 'bad' && statusCls(v) !== 'bad' ? v2 : v;
+    const open = isOpen(ap, pt.t), info = apInfo(id);
+    const opl = `<div class="al-src">Öffnungszeit: ${esc(hoursText(id))}${open === false ? ' – <b class="bad">zu dieser Zeit geschlossen</b>' : open === null ? ' – nicht geprüft' : ''}${info.ppr ? ' · <b>PPR</b>' : ''}</div>`;
     const wxl = v.status === 'none' ? '' : [`Wolken ${v.ceil === Infinity ? 'keine Untergrenze' : fmtCeil(v.ceil)}`, `Sicht ${fmtVis(v.vis)}`, v.wind ? `Wind ${fmtWind(v.wind)}` : '', v.wxs ? wxWords(v.wxs) : ''].filter(Boolean).join(' · ');
-    return `${leg}<div class="al-row al-${statusCls(v)}${ap.isAlt ? ' alt' : ''}">
-      <div class="al-time"><b>${hhmm(e.t)}Z</b><span>${e.kind}</span></div>
+    const tl = pt.kind === 'Abflug' ? `<b>${hhmm(pt.t)}Z</b><span>ETD</span>` : `<b>${hhmm(pt.t)}Z</b><span>ETA</span>${pt.stay > 0 ? `<b class="etd2">${hhmm(pt.etd)}Z</b><span>ETD</span>` : ''}`;
+    return `${leg}<div class="al-row al-${statusCls(worst)}${ap.isAlt ? ' alt' : ''}">
+      <div class="al-time">${tl}</div>
       <div class="al-dot"></div>
       <div class="al-main">
+        <div class="al-kind">${KIND[pt.kind]}${pt.stay > 0 ? ` · Aufenthalt ${pt.stay} min` : ''}</div>
         <div class="al-head"><b>${esc(id)}</b> <span class="al-name">${esc(ap.name)}</span>${v.cat ? ` <span class="pill cat-${v.cat}">${v.cat}</span>` : ''}<span class="status ${statusCls(v)}">${statusText(v)}</span></div>
         ${wxl ? `<div class="al-wx">${wxl}</div>` : ''}
         ${v.tempo ? `<div class="al-tempo">Zeitweise (TEMPO): Wolken ${fmtCeil(v.tempo.ceil)} · Sicht ${fmtVis(v.tempo.vis)}${v.tempo.wx ? ' · ' + wxWords(v.tempo.wx) : ''}</div>` : ''}
+        ${v2 ? `<div class="al-wx">Zum Weiterflug ${hhmm(pt.etd)}Z: <span class="status ${statusCls(v2)}">${statusText(v2)}</span></div>` : ''}
         ${compact ? '' : `<div class="al-src">Quelle: ${esc(v.src)}</div>`}${opl}
       </div>
     </div>`;
-  }).join('')}</div>`;
+  };
+  return `<div class="along">${fp.points.map(row).join('')}</div>`;
 }
 
 const CHECKS_HTML = (fp) => {
@@ -977,7 +994,7 @@ function wetterMount() {
 }
 
 // ---------- Tab „Flug": drei Schritte ----------
-const FLIGHT_DEFAULT = { from: '', via: [], to: '', alt: '' };
+const FLIGHT_DEFAULT = { from: '', via: [], stays: [], to: '', alt: '' };
 const flightIn = () => ({ ...FLIGHT_DEFAULT, ...store.get('flight', {}) });
 const flightIds = (f) => [f.from, ...f.via, f.to].map((x) => (x || '').trim().toUpperCase()).filter((x) => /^[A-Z0-9]{4}$/.test(x));
 function planFormHTML(p) {
@@ -1002,11 +1019,10 @@ function planFormHTML(p) {
     ${num('alt', 'Reiseflughöhe', 'ft MSL', p.alt, 500)}
     <li><label class="row"><span>Höhenwind einrechnen</span><input type="checkbox" class="switch" data-p="useWind"${p.useWind ? ' checked' : ''}></label></li>
     ${num('allow', 'Zuschlag je Etappe', 'min', p.allow)}
-    ${num('stop', 'Aufenthalt je Zwischenlandung', 'min', p.stop, 5)}
     ${num('reserve', 'Reserve', 'min', p.reserve, 5)}
     ${num('taxi', 'Rollen je Start', 'l', p.taxi)}
   </ul>
-  <p class="group-note">Zuschlag: Steigflug, Abflug- und Anflugverfahren. Aufenthalt 0 = Zwischenplätze werden nur überflogen. mwK mit genäherter Missweisung (ca. 3–5° Ost in Deutschland).</p>`;
+  <p class="group-note">Zuschlag: Steigflug, Abflug- und Anflugverfahren. Aufenthalte trägst du je Zwischenlandung in der Route ein. mwK mit genäherter Missweisung (ca. 3–5° Ost in Deutschland).</p>`;
 }
 function planFormMount() {
   document.querySelectorAll('[data-p]').forEach((el) => el.addEventListener('change', () => {
@@ -1338,8 +1354,10 @@ function moduleStatus(id) {
   const s = settings(), fp = flightPlan(depMs(p), p);
   if (id === 'wetter') {
     const all = F.airports.map((ap) => ({ ap, hours: ap.error ? null : computeHours(ap, F.start, s) }));
-    const bad = all.filter(({ ap, hours }) => { const e = fp.eta[ap.id]; if (!e || !hours || ap.isAlt) return false; const v = evalAt(ap, hours, e.t, s); return statusCls(v) !== 'ok'; });
-    return bad.length ? { ok: false, warn: true, text: `${p.rules} · ${bad.length} Platz/Plätze zu deiner Zeit nicht fliegbar` } : { ok: true, text: `${p.rules} · Abflug ${hhmm(fp.dep)}Z · alle Plätze fliegbar` };
+    const byA = Object.fromEntries(all.map((x) => [x.ap.id, x]));
+    const bad = fp.points.filter((pt) => pt.kind !== 'Ausweich').filter((pt) => { const x = byA[pt.id]; if (!x?.hours) return true;
+      return [pt.t, ...(pt.stay > 0 ? [pt.etd] : [])].some((tt) => statusCls(evalAt(x.ap, x.hours, tt, s)) !== 'ok'); });
+    return bad.length ? { ok: false, warn: true, text: `${p.rules} · ${bad.length} von ${fp.points.filter((pt) => pt.kind !== 'Ausweich').length} Stationen zu deiner Zeit nicht fliegbar` } : { ok: true, text: `${p.rules} · Abflug ${hhmm(fp.dep)}Z · alle Plätze fliegbar` };
   }
   if (id === 'notam') { const n = store.get('notam', {}); return n.key === ids.join() && n.checkedAt ? { ok: true, text: `geprüft ${utc(n.checkedAt)}` } : { ok: false, text: 'noch nicht geprüft' }; }
   if (id === 'fuel') { const fc = fuelCalc(fp, p); return fc.ok == null ? { ok: false, text: `Bedarf ${Math.ceil(fc.required)} l – an Bord eintragen` } : fc.ok ? { ok: true, text: `${fc.onBoard} l an Bord ≥ ${Math.ceil(fc.required)} l Bedarf` } : { ok: false, warn: true, text: `zu wenig: ${fc.onBoard} l < ${Math.ceil(fc.required)} l` }; }
@@ -1370,7 +1388,7 @@ const weatherReady = () => { const ids = flightIds(flightIn()); return F && F.id
 const AIP_LINK = 'https://aip.dfs.de/basicVFR';
 function apInfoHTML() {
   const f = flightIn();
-  const ids = [...flightIds(f), ...(/^[A-Z0-9]{4}$/.test(f.alt) ? [f.alt] : [])];
+  const ids = [...new Set([...flightIds(f), ...(/^[A-Z0-9]{4}$/.test(f.alt) ? [f.alt] : [])])];
   const hoursSel = (id) => { const i = apInfo(id);
     return `<select data-ah="${id}" data-k="mode">${[['unknown', 'nicht eingetragen'], ['times', 'Uhrzeit (UTC)'], ['srss', 'SR–SS (Tageslicht)'], ['h24', 'H24']].map(([v, t]) => `<option value="${v}"${i.mode === v ? ' selected' : ''}>${t}</option>`).join('')}</select>`; };
   return ids.length ? ids.map((id) => { const i = apInfo(id);
@@ -1406,7 +1424,7 @@ function apInfoMount(W) {
 }
 function m1View() {
   const f = flightIn(), routes = store.get('routes', []), p = plan();
-  const ids = [...flightIds(f), ...(/^[A-Z0-9]{4}$/.test(f.alt) ? [f.alt] : [])];
+  const ids = [...new Set([...flightIds(f), ...(/^[A-Z0-9]{4}$/.test(f.alt) ? [f.alt] : [])])];
   const row = (key, label, val, k, removable) => `<li><div class="row route-row">
       <span class="rr-label">${label}</span>
       <input type="text" class="icao" maxlength="4" data-f="${key}"${k != null ? ` data-i="${k}"` : ''} value="${esc(val)}" placeholder="ICAO" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false">
@@ -1420,7 +1438,7 @@ function m1View() {
   <p class="group-label">Route</p>
   <ul class="group">
     ${row('from', 'Start', f.from)}
-    ${f.via.map((v, k) => row('via', `Zwischenlandung ${f.via.length > 1 ? k + 1 : ''}`, v, k, true)).join('')}
+    ${f.via.map((v, k) => row('via', `Zwischenlandung ${f.via.length > 1 ? k + 1 : ''}`, v, k, true) + `<li><label class="row stay-row"><span>Aufenthalt in ${esc(v || '…')} <span class="detail">(leer = kein Aufenthalt)</span></span><span class="inp"><input type="number" inputmode="numeric" data-stay="${k}" value="${(f.stays || [])[k] || ''}" placeholder="0" step="5" min="0"> min</span></label></li>`).join('')}
     <li><button class="row center" id="addVia">＋ Zwischenlandung oder Wegpunkt-Platz hinzufügen</button></li>
     ${row('to', 'Ziel', f.to)}
   </ul>
@@ -1457,11 +1475,12 @@ function m1Mount() {
       save(f); if (el.value.length === 4 || el.value.length === 0) { info(); refreshAp(); }
     });
   });
-  document.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', () => { const f = flightIn(); f.via.splice(+b.dataset.rm, 1); save(f); keepScroll(); }));
-  $('addVia').addEventListener('click', () => { const f = flightIn(); if (f.via.length >= 6) return; f.via.push(''); save(f); keepScroll(); });
+  document.querySelectorAll('[data-rm]').forEach((b) => b.addEventListener('click', () => { const f = flightIn(); f.via.splice(+b.dataset.rm, 1); (f.stays || []).splice(+b.dataset.rm, 1); save(f); keepScroll(); }));
+  $('addVia').addEventListener('click', () => { const f = flightIn(); if (f.via.length >= 6) return; f.via.push(''); f.stays = f.stays || []; f.stays[f.via.length - 1] = 0; save(f); keepScroll(); });
+  document.querySelectorAll('[data-stay]').forEach((el) => el.addEventListener('change', () => { const f = flightIn(); f.stays = f.stays || []; f.stays[+el.dataset.stay] = Math.max(0, parseFloat(el.value) || 0); save(f); }));
   document.querySelectorAll('[data-r]').forEach((b) => b.addEventListener('click', () => {
     const r = store.get('routes', [])[b.dataset.r]; if (!r) return;
-    save({ from: r.ids[0] || '', via: r.ids.slice(1, -1), to: r.ids.length > 1 ? r.ids[r.ids.length - 1] : '', alt: r.alt || '' }); keepScroll();
+    save({ from: r.ids[0] || '', via: r.ids.slice(1, -1), stays: r.stays || [], to: r.ids.length > 1 ? r.ids[r.ids.length - 1] : '', alt: r.alt || '' }); keepScroll();
   }));
   document.querySelectorAll('[data-rdel]').forEach((b) => b.addEventListener('click', () => {
     const routes = store.get('routes', []); const r = routes[b.dataset.rdel];
@@ -1471,7 +1490,7 @@ function m1Mount() {
     const f = flightIn(), ids = flightIds(f);
     if (ids.length < 2) return alert('Bitte mindestens Start und Ziel eingeben.');
     const name = prompt('Name der Route', ids.join(' – ')); if (!name?.trim()) return;
-    const routes = store.get('routes', []); routes.push({ name: name.trim(), ids, alt: /^[A-Z0-9]{4}$/.test(f.alt) ? f.alt : '' }); store.set('routes', routes); keepScroll();
+    const routes = store.get('routes', []); routes.push({ name: name.trim(), ids, stays: f.stays || [], alt: /^[A-Z0-9]{4}$/.test(f.alt) ? f.alt : '' }); store.set('routes', routes); keepScroll();
   });
   planFormMount();
   $('loadWx').addEventListener('click', () => {
@@ -1710,7 +1729,7 @@ function briefingAllView() {
   const pc = B.profile && fp.legs.length ? profileCheck(fp, { ...s, alt: p.alt }) : null;
   const routeTxt = B.ids.join(' → ') + (B.altId ? ` (Ausweich ${B.altId})` : '');
   const status = MODULES.map((m) => ({ m, st: moduleStatus(m.id) }));
-  const apIds = [...B.ids, ...(B.altId ? [B.altId] : [])];
+  const apIds = [...new Set([...B.ids, ...(B.altId ? [B.altId] : [])])];
   return `
   <div class="print-only print-head">
     <h1>FlightPrep – Flugvorbereitung</h1>
@@ -1885,7 +1904,7 @@ async function buildBriefingPDF(progress) {
   const { s, p, all, fp, win } = flightData();
   const f = flightIn(), ids = flightIds(f), key = ids.join(), n = store.get('notam', {});
   const fc = fuelCalc(fp, p), wb = wbCalc(p, fc), now = Date.now();
-  const apIds = [...B.ids, ...(B.altId ? [B.altId] : [])];
+  const apIds = [...new Set([...B.ids, ...(B.altId ? [B.altId] : [])])];
   const D = new PdfDoc(`FlightPrep · ${B.ids.join(' → ')} · Export ${utc(now)}`);
   const step = async (t) => { progress?.(t); await new Promise((r) => setTimeout(r, 0)); };
 
@@ -1915,14 +1934,16 @@ async function buildBriefingPDF(progress) {
   await step('Wetter …');
   D.h2('2 · Wetter zu deinen Zeiten');
   const byId = Object.fromEntries(all.map((x) => [x.ap.id, x]));
-  for (const id of apIds) {
-    const x = byId[id], e = fp.eta[id]; if (!x || !e) continue;
-    const { ap, hours } = x;
+  for (const pt of fp.points) {
+    const x = byId[pt.id]; if (!x) continue;
+    const { ap, hours } = x, id = pt.id;
     if (ap.error || !hours) { D.text(`${id}: ${ap.error || 'keine Daten'}`, { color: RED }); continue; }
-    const v = evalAt(ap, hours, e.t, s), info = apInfo(id);
-    D.h3(`${hhmm(e.t)}Z ${e.kind} · ${id} ${ap.name}${v.cat ? ` · ${v.cat}` : ''} · ${statusText(v)}`, stColor(v));
+    const v = evalAt(ap, hours, pt.t, s), info = apInfo(id);
+    if (pt.leg) D.text(`↓ ${pt.leg.from} → ${pt.leg.to}: ${Math.round(pt.leg.dist)} NM · ${fmtDur(pt.leg.min)} · GS ${Math.round(pt.leg.gs)} kt`, { size: 17, color: GREY, gap: 0 });
+    D.h3(`${ptLabel(pt)} · ${KIND[pt.kind]} ${id} ${ap.name}${v.cat ? ` · ${v.cat}` : ''} · ${statusText(v)}`, stColor(v));
     if (v.status !== 'none') D.text([`Wolken ${v.ceil === Infinity ? 'keine Untergrenze' : fmtCeil(v.ceil)}`, `Sicht ${fmtVis(v.vis)}`, v.wind ? `Wind ${fmtWind(v.wind)}` : '', v.wxs ? wxWords(v.wxs) : ''].filter(Boolean).join(' · '), { size: 20, gap: 2 });
     if (v.tempo) D.text(`Zeitweise (TEMPO): Wolken ${fmtCeil(v.tempo.ceil)} · Sicht ${fmtVis(v.tempo.vis)}${v.tempo.wx ? ' · ' + wxWords(v.tempo.wx) : ''}`, { size: 19, color: ORANGE, gap: 2 });
+    if (pt.stay > 0) { const v2 = evalAt(ap, hours, pt.etd, s); D.text(`Aufenthalt ${pt.stay} min · zum Weiterflug ${hhmm(pt.etd)}Z: ${statusText(v2)}`, { size: 19, color: stColor(v2), gap: 2 }); }
     D.text(`Quelle: ${v.src} · Öffnungszeit: ${hoursText(id)}${info.ppr ? ' · PPR' : ''}`, { size: 17, color: GREY });
   }
   D.text(win.length ? `Mögliche Abflugzeiten (${p.acData.name}): ${win.map(([a, b]) => `${WD[new Date(a).getUTCDay()]} ${hhmm(a)}${b > a ? '–' + hhmm(b) : ''} UTC`).join(', ')}` : 'Keine passende Abflugzeit in den nächsten 48 h.', { size: 20, weight: 600, color: win.length ? GREEN : RED });
@@ -1935,7 +1956,7 @@ async function buildBriefingPDF(progress) {
   for (const { ap, hours } of all) {
     if (ap.error || !hours) continue;
     await step(`Wetter ${ap.id} …`);
-    const cimg = await svgImg(chartSVG(ap, hours, s, fp.eta[ap.id]));
+    const cimg = await svgImg(chartSVG(ap, hours, s, ptsFor(fp, ap.id)));
     D.h3(`${ap.id} ${ap.name}${ap.isAlt ? ' (Ausweich)' : ''} – 48 Stunden`, undefined, D.imgH(cimg));
     D.image(cimg, 'Blau: TAF · orange gestrichelt: TEMPO · grau: Modell · Punkt: METAR · rote Linie: Minimum · schattiert: Nacht · Streifen: Kategorie und „nicht fliegbar“');
     D.text(`METAR${ap.metarSrc ? ` (${ap.metarSrc.id}, ${ap.metarSrc.dist} km)` : ''}: ${ap.metar?.rawOb || 'nicht verfügbar'}`, { size: 17, mono: true, gap: 2 });
@@ -2004,7 +2025,7 @@ async function startPDF() {
   box.innerHTML = '<div class="pdf-busy"><div class="spinner"></div><span id="pdfStep">PDF wird erstellt …</span></div>';
   try {
     const { blob, pages } = await buildBriefingPDF((t) => { const el = $('pdfStep'); if (el) el.textContent = t; });
-    const d = new Date(), name = `FlightPrep_${B.ids.join('-')}_${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}_${p2(d.getUTCHours())}${p2(d.getUTCMinutes())}Z.pdf`;
+    const d = new Date(depMs(plan())), name = `${String(d.getUTCFullYear()).slice(2)}${p2(d.getUTCMonth() + 1)}${p2(d.getUTCDate())}_briefing_${B.ids.join('_')}.pdf`;
     if (pdfOut?.url) URL.revokeObjectURL(pdfOut.url);
     pdfOut = { file: new File([blob], name, { type: 'application/pdf' }), url: URL.createObjectURL(blob), name };
     box.innerHTML = `<p class="pdf-ok">${SYM.ok} PDF fertig: ${pages} Seiten, ${(blob.size / 1e6).toFixed(1)} MB</p>

@@ -517,6 +517,11 @@ textarea { width: 100%; border: 0; border-radius: 10px; background: var(--fill-s
 .pdf-ok svg { width: 26px; height: 26px; color: var(--vfr); }
 .row input.full { width: 100%; text-align: left; }
 
+.stay-row { gap: 12px; }
+.stay-row input[type="number"] { width: 80px; }
+.al-kind { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); margin-bottom: 2px; }
+.al-time .etd2 { display: block; margin-top: 6px; }
+
 .print-only { display: none; }
 
 /* ---------- PDF / Drucken ---------- */
