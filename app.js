@@ -496,8 +496,11 @@ function timelineHTML(all, fp) {
   const lightRow = Array.from({ length: SPAN }, (_, i) => ({ i, t: B.start + i * H, l: light(ref.lat, ref.lon, B.start + i * H + H / 2) }));
   const lr = `<div class="tl-name tl-sub">Licht</div><div class="tl-row tl-light">${runs(lightRow, (h) => h.l).map((r) =>
     `<span class="l-${r.k}" style="flex:${r.b - r.a}"></span>`).join('')}</div>`;
-  return `<div class="timeline">${head}${lr}${all.map(({ ap, hours }) =>
-    `<div class="tl-name">${esc(ap.id)}</div>${cells(hours, (h) => 'cat-' + (h.cat || 'none'), ap.id, new Set(ptMarks(ptsFor(fp, ap.id)).map((m) => hourOf(m.t)).filter((v) => v != null)))}`).join('')}</div>`;
+  const byId = Object.fromEntries(all.map((x) => [x.ap.id, x]));
+  const rows = fp ? fp.points.filter((pt) => byId[pt.id]).map((pt) => ({ ...byId[pt.id], pt })) : all.map((x) => ({ ...x, pt: null }));
+  const SHORT = { Abflug: 'ETD', Zwischenlandung: 'ETA', Ankunft: 'ETA', Ausweich: 'Ausw.' };
+  return `<div class="timeline">${head}${lr}${rows.map(({ ap, hours, pt }) =>
+    `<div class="tl-name">${esc(ap.id)}${pt ? `<small>${SHORT[pt.kind]} ${hhmm(pt.t)}Z</small>` : ''}</div>${cells(hours, (h) => 'cat-' + (h.cat || 'none'), ap.id, new Set(ptMarks(pt ? [pt] : []).map((m) => hourOf(m.t)).filter((v) => v != null)))}`).join('')}</div>`;
 }
 
 // Zeitfenster, in denen alle Plätze über den Minima liegen und Tag ist
@@ -888,7 +891,7 @@ function alongHTML(all, fp, s, compact) {
     const x = byId[pt.id], id = pt.id, l = pt.leg;
     if (!x) return '';
     const { ap, hours } = x;
-    const leg = l ? `<div class="al-leg">${Math.round(l.dist)} NM · ${fmtDur(l.min)} · GS ${Math.round(l.gs)} kt${ap.isAlt ? ' · ab Ziel' : ''}</div>` : '';
+    const leg = l ? `<div class="al-leg"><span></span><span class="al-line"></span><span>${Math.round(l.dist)} NM · ${fmtDur(l.min)} · GS ${Math.round(l.gs)} kt${ap.isAlt ? ' · ab Ziel' : ''}</span></div>` : '';
     if (ap.error || !hours) return `${leg}<div class="al-row al-bad"><div class="al-time"><b>–</b></div><div class="al-dot"></div><div class="al-main"><div class="al-head"><b>${esc(id)}</b></div><div class="warn">${esc(ap.error || 'keine Daten')}</div></div></div>`;
     const v = evalAt(ap, hours, pt.t, s);
     // Bei Aufenthalt auch zum Weiterflug (ETD) prüfen
@@ -1171,18 +1174,59 @@ async function fillFiles(root = document) {
     const items = await Promise.all(keys.map(async (k) => ({ k, f: await files.get(k) })));
     box.innerHTML = items.length ? items.map(({ k, f }) => `<figure class="file">
         ${f.type.startsWith('image/') ? `<img src="${f.data}" alt="${esc(f.name)}">` : `<a class="file-doc" href="${f.data}" download="${esc(f.name)}" target="_blank" rel="noopener">📄 ${esc(f.name)}</a>`}
-        <figcaption>${esc(f.name)} · ${utc(f.at)}${box.dataset.edit === '1' ? `${f.type.startsWith('image/') ? ` <button class="btn-text noprint" data-ocr="${esc(k)}">Text erkennen</button>` : ''} <button class="btn-text danger-text noprint" data-fdel="${esc(k)}">Entfernen</button>` : ''}</figcaption>
+        <figcaption>${esc(f.name)} · ${utc(f.at)}${box.dataset.edit === '1' ? `${f.type.startsWith('image/') ? ` <button class="btn-text noprint" data-ocr="${esc(k)}">${f.fromPdf ? 'Text auswerten' : 'Text erkennen'}</button>` : ` <button class="btn-text noprint" data-conv="${esc(k)}">In Seitenbilder umwandeln</button>`} <button class="btn-text danger-text noprint" data-fdel="${esc(k)}">Entfernen</button>` : ''}</figcaption>
       </figure>`).join('') : (box.dataset.edit === '1' ? '<p class="detail">Noch keine Dateien.</p>' : '');
     box.querySelectorAll('[data-fdel]').forEach((b) => b.addEventListener('click', async () => {
       if (!confirm('Datei entfernen?')) return; await files.del(b.dataset.fdel); await files.del('ocr:' + b.dataset.fdel).catch(() => {}); fillFiles(box.parentElement);
     }));
     box.querySelectorAll('[data-ocr]').forEach((b) => b.addEventListener('click', () => runOcr(b)));
+    box.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', async () => {
+      const k = b.dataset.conv, f = await files.get(k); b.textContent = 'Wird umgewandelt …';
+      try { const blob = await (await fetch(f.data)).blob(); await storePdf(blob, f.name, k.slice(0, k.lastIndexOf(':') + 1)); await files.del(k); fillFiles(box.parentElement); }
+      catch (e) { b.textContent = 'Umwandeln fehlgeschlagen'; alert(e.message); }
+    }));
   }
+}
+// PDF-Seiten mit PDF.js (Apache-2.0, liegt in pdfjs/) in Bilder umwandeln und den enthaltenen Text auslesen
+let pdfjsLib = null;
+async function pdfPages(blob, onPage) {
+  if (!pdfjsLib) {
+    pdfjsLib = await import(new URL('pdfjs/pdf.min.mjs', location.href).href);
+    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs/pdf.worker.min.mjs', location.href).href;
+  }
+  const doc = await pdfjsLib.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), standardFontDataUrl: new URL('pdfjs/standard_fonts/', location.href).href }).promise;
+  const n = Math.min(doc.numPages, 20), out = [];
+  for (let i = 1; i <= n; i++) {
+    onPage?.(i, n);
+    const page = await doc.getPage(i), vp = page.getViewport({ scale: 2 });
+    const c = document.createElement('canvas'); c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: g, viewport: vp }).promise;
+    const tc = await page.getTextContent();
+    out.push({ data: c.toDataURL('image/jpeg', 0.85), text: tc.items.map((it) => it.str + (it.hasEOL ? '\n' : ' ')).join(''), page: i, pages: doc.numPages });
+  }
+  return out;
+}
+async function storePdf(blob, name, prefix, status) {
+  const pages = await pdfPages(blob, (i, n) => status?.(`PDF wird umgewandelt … Seite ${i} von ${n}`));
+  for (const pg of pages) {
+    const key = `${prefix}${Date.now()}-${String(pg.page).padStart(2, '0')}-${Math.random().toString(36).slice(2, 6)}`;
+    await files.put(key, { name: `${name} – Seite ${pg.page}/${pg.pages}`, type: 'image/jpeg', data: pg.data, at: Date.now(), fromPdf: true });
+    if (pg.text.trim().length > 20) await files.put('ocr:' + key, { text: pg.text, at: Date.now(), fromPdf: true });
+  }
+  return pages.length;
 }
 function bindUpload(input, prefix, after) {
   input?.addEventListener('change', async () => {
-    for (const f of input.files) { const v = await readFile(f); await files.put(`${prefix}${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, v); }
-    input.value = ''; after ? after() : fillFiles();
+    const lab = input.closest('label'), orig = lab?.firstChild?.textContent;
+    const status = (t) => { if (lab?.firstChild) lab.firstChild.textContent = t; };
+    try {
+      for (const f of input.files) {
+        if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) await storePdf(f, f.name, prefix, status);
+        else { const v = await readFile(f); await files.put(`${prefix}${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, v); }
+      }
+    } catch (e) { alert('Datei konnte nicht verarbeitet werden: ' + e.message); }
+    status(orig); input.value = ''; after ? after() : fillFiles();
   });
 }
 
@@ -1195,7 +1239,7 @@ async function ocrText(key, onProgress) {
   const cached = await files.get('ocr:' + key).catch(() => null);
   if (cached?.text) return cached.text;
   const f = await files.get(key);
-  if (!f?.type?.startsWith('image/')) throw new Error('Texterkennung geht nur bei Bildern (Screenshot/Foto), nicht bei PDF-Dateien.');
+  if (!f?.type?.startsWith('image/')) throw new Error('Bitte zuerst „In Seitenbilder umwandeln“ tippen.');
   if (!window.Tesseract) await loadScript('ocr/tesseract.min.js');
   ocrProgress = onProgress;
   if (!ocrWorker) {
@@ -1254,7 +1298,17 @@ async function runOcr(btn) {
   box.innerHTML = '<div class="pdf-busy"><div class="spinner"></div><span class="ocr-step">Texterkennung wird geladen … (beim ersten Mal ca. 12 MB)</span></div>';
   const step = (m) => { const el = box.querySelector('.ocr-step'); if (el && m?.status) el.textContent = `${m.status === 'recognizing text' ? 'Erkenne Text' : 'Lade'} … ${Math.round((m.progress || 0) * 100)} %`; };
   try {
-    const text = await ocrText(key, step);
+    // Seiten einer PDF gemeinsam auswerten (eine NOTAM-Liste kann über mehrere Seiten gehen)
+    const f0 = await files.get(key);
+    let text;
+    if (f0?.fromPdf) {
+      const base = f0.name.replace(/ – Seite \d+\/\d+$/, ''), prefix = key.slice(0, key.lastIndexOf(':') + 1);
+      const keys = [];
+      for (const k of await files.list(prefix)) { const f = await files.get(k); if (f?.fromPdf && f.name.startsWith(base + ' – Seite')) keys.push(k); }
+      const parts = [];
+      for (const k of keys) parts.push(await ocrText(k, step));
+      text = parts.join('\n');
+    } else text = await ocrText(key, step);
     if (key.startsWith('notam:')) renderNotamOcr(box, text); else renderAipOcr(box, text, key.split(':')[1]);
   } catch (e) { box.innerHTML = `<p class="bad">${esc(e.message)}</p>`; }
 }
@@ -1527,7 +1581,7 @@ function apInfoHTML() {
       <p class="detail">${i.checkedAt ? `Zuletzt geändert ${utc(i.checkedAt)}` : 'Noch nicht eingetragen.'} Öffnungszeiten können sich ändern – vor jedem Flug in der AIP und den NOTAM prüfen.</p>
       <p class="group-label tight">Flugplatzkarten</p>
       ${filesBox(`chart:${id}:`, true)}
-      <label class="btn-tinted small upload">Karte hinzufügen (Foto, Screenshot, PDF)<input type="file" accept="image/*,application/pdf" multiple data-up="chart:${id}:" hidden></label>
+      <label class="btn-tinted small upload">Karte hinzufügen (Foto, Screenshot oder PDF)<input type="file" accept="image/*,application/pdf" multiple data-up="chart:${id}:" hidden></label>
     </div>`; }).join('') : '<p class="group-note">Erst Route eingeben.</p>';
 }
 function apInfoMount(W) {
@@ -2121,20 +2175,20 @@ async function buildBriefingPDF(progress) {
   const ck = checks();
   CHECKS.forEach(([k, t]) => D.text(`${ck[k] ? '☑' : '☐'}  ${t}${k === 'alt' && B.altId ? ` (${B.altId})` : ''}`, { size: 20, gap: 2, color: ck[k] ? '#000' : '#000' }));
 
-  // Anhang: Flugplatzkarten und NOTAM-Dokumente
+  D.y += 10;
+  D.text('Quellen: METAR/TAF aviationweather.gov (NOAA), Flugplätze OurAirports, Modell und Gelände Open-Meteo (u. a. DWD ICON); Flugplatz-Infos, Karten und NOTAM vom Nutzer aus AIP VFR und DFS AIS-Portal übernommen. Keine amtliche Flugwetterberatung oder Flugvorbereitung – vor dem Flug amtliche Quellen und Flughandbuch prüfen.', { size: 16, color: GREY });
+
+  // Anhang: Flugplatzkarten und NOTAM-Dokumente – jede Seite auf einem eigenen Blatt
   await step('Anhang: Karten und NOTAM …');
   const attach = [];
   for (const id of apIds) for (const k of await files.list(`chart:${id}:`).catch(() => [])) attach.push({ title: `Flugplatzkarte ${id}`, f: await files.get(k) });
   for (const k of await files.list(`notam:${key}:`).catch(() => [])) attach.push({ title: 'NOTAM', f: await files.get(k) });
   if (attach.length) {
-    D.page(); D.h2('Anhang');
-    for (const a of attach) {
-      if (a.f?.type?.startsWith('image/')) { const img = usable(await loadImg(a.f.data)); D.h3(`${a.title} – ${a.f.name}`, undefined, D.imgH(img)); D.image(img, `hinzugefügt ${utc(a.f.at)}`); }
-      else D.text(`${a.title}: ${a.f?.name} (PDF-Datei – kann nicht eingebettet werden, bitte als Screenshot hinzufügen oder separat mitführen)`, { size: 19, color: ORANGE });
+    for (const [n, a] of attach.entries()) {
+      if (a.f?.type?.startsWith('image/')) { const img = usable(await loadImg(a.f.data)); D.page(); D.text(`Anhang ${n + 1}/${attach.length} · ${a.title} – ${a.f.name}`, { size: 22, weight: 700, gap: 8 }); D.image(img, undefined, D.H - 2 * D.M - 120); D.text(`hinzugefügt ${utc(a.f.at)}`, { size: 17, color: GREY }); }
+      else D.text(`${a.title}: ${a.f?.name} – noch als PDF gespeichert. In der App unter der Datei „In Seitenbilder umwandeln“ tippen, dann erscheint sie hier.`, { size: 19, color: ORANGE });
     }
   }
-  D.y += 10;
-  D.text('Quellen: METAR/TAF aviationweather.gov (NOAA), Flugplätze OurAirports, Modell und Gelände Open-Meteo (u. a. DWD ICON); Flugplatz-Infos, Karten und NOTAM vom Nutzer aus AIP VFR und DFS AIS-Portal übernommen. Keine amtliche Flugwetterberatung oder Flugvorbereitung – vor dem Flug amtliche Quellen und Flughandbuch prüfen.', { size: 16, color: GREY });
   await step('PDF wird zusammengesetzt …');
   D.footer();
   return { blob: D.blob(), pages: D.pages.length };

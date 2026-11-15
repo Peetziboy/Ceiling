@@ -1,5 +1,5 @@
 // Bei JEDER Änderung an der App diese Nummer erhöhen, sonst zeigt das iPad die alte Version.
-const CACHE = 'flightprep-v4';
+const CACHE = 'flightprep-v6';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
