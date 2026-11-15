@@ -522,6 +522,18 @@ textarea { width: 100%; border: 0; border-radius: 10px; background: var(--fill-s
 .al-kind { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); margin-bottom: 2px; }
 .al-time .etd2 { display: block; margin-top: 6px; }
 
+.ocr-out { margin-top: 12px; background: var(--fill-soft); border-radius: 12px; padding: 12px 14px; }
+.ocr-out:empty { display: none; }
+.ocr-note { margin: 0 0 10px; font-size: 14px; }
+.ocr-item { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-top: 0.5px solid var(--sep); font-size: 15px; cursor: pointer; }
+.ocr-item .check { margin-top: 2px; }
+.ocr-item small { color: var(--text-2); }
+.ocr-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; font-size: 15px; }
+.ocr-chip { display: inline-flex; align-items: center; gap: 6px; margin: 4px 10px 0 0; min-height: 32px; cursor: pointer; }
+.ocr-line { display: block; color: var(--text-2); margin: 2px 0; }
+.ocr-raw { margin-top: 10px; font-size: 13px; }
+.ocr-raw pre { white-space: pre-wrap; font-size: 12px; max-height: 260px; overflow: auto; background: var(--card); padding: 8px; border-radius: 8px; }
+
 .print-only { display: none; }
 
 /* ---------- PDF / Drucken ---------- */

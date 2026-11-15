@@ -1171,17 +1171,139 @@ async function fillFiles(root = document) {
     const items = await Promise.all(keys.map(async (k) => ({ k, f: await files.get(k) })));
     box.innerHTML = items.length ? items.map(({ k, f }) => `<figure class="file">
         ${f.type.startsWith('image/') ? `<img src="${f.data}" alt="${esc(f.name)}">` : `<a class="file-doc" href="${f.data}" download="${esc(f.name)}" target="_blank" rel="noopener">📄 ${esc(f.name)}</a>`}
-        <figcaption>${esc(f.name)} · ${utc(f.at)}${box.dataset.edit === '1' ? ` <button class="btn-text danger-text noprint" data-fdel="${esc(k)}">Entfernen</button>` : ''}</figcaption>
+        <figcaption>${esc(f.name)} · ${utc(f.at)}${box.dataset.edit === '1' ? `${f.type.startsWith('image/') ? ` <button class="btn-text noprint" data-ocr="${esc(k)}">Text erkennen</button>` : ''} <button class="btn-text danger-text noprint" data-fdel="${esc(k)}">Entfernen</button>` : ''}</figcaption>
       </figure>`).join('') : (box.dataset.edit === '1' ? '<p class="detail">Noch keine Dateien.</p>' : '');
     box.querySelectorAll('[data-fdel]').forEach((b) => b.addEventListener('click', async () => {
-      if (!confirm('Datei entfernen?')) return; await files.del(b.dataset.fdel); fillFiles(box.parentElement);
+      if (!confirm('Datei entfernen?')) return; await files.del(b.dataset.fdel); await files.del('ocr:' + b.dataset.fdel).catch(() => {}); fillFiles(box.parentElement);
     }));
+    box.querySelectorAll('[data-ocr]').forEach((b) => b.addEventListener('click', () => runOcr(b)));
   }
 }
 function bindUpload(input, prefix, after) {
   input?.addEventListener('change', async () => {
     for (const f of input.files) { const v = await readFile(f); await files.put(`${prefix}${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, v); }
     input.value = ''; after ? after() : fillFiles();
+  });
+}
+
+// ---------- Texterkennung (kostenlos, läuft auf dem Gerät) ----------
+// Tesseract (Apache-2.0) liegt im Ordner ocr/ neben der App. Erkannter Text ist nur ein Vorschlag –
+// übernommen wird nichts ohne Bestätigung durch den Piloten.
+let ocrWorker = null, ocrProgress = null;
+function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('Texterkennung konnte nicht geladen werden (offline?)')); document.head.appendChild(s); }); }
+async function ocrText(key, onProgress) {
+  const cached = await files.get('ocr:' + key).catch(() => null);
+  if (cached?.text) return cached.text;
+  const f = await files.get(key);
+  if (!f?.type?.startsWith('image/')) throw new Error('Texterkennung geht nur bei Bildern (Screenshot/Foto), nicht bei PDF-Dateien.');
+  if (!window.Tesseract) await loadScript('ocr/tesseract.min.js');
+  ocrProgress = onProgress;
+  if (!ocrWorker) {
+    ocrWorker = await Tesseract.createWorker(['deu', 'eng'], 1, {
+      workerPath: new URL('ocr/worker.min.js', location.href).href,
+      corePath: new URL('ocr/', location.href).href,
+      langPath: new URL('ocr/lang', location.href).href,
+      gzip: true,
+      logger: (m) => ocrProgress?.(m),
+    });
+  }
+  ocrProgress = onProgress;
+  const { data } = await ocrWorker.recognize(f.data);
+  await files.put('ocr:' + key, { text: data.text, at: Date.now() });
+  return data.text;
+}
+
+// NOTAM im ICAO-Format: Kennung (z. B. B1234/26), A) Ort, B) Beginn, C) Ende, D) Zeiten, E) Text
+const notamTime = (v) => { const m = /^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/.exec(v || ''); return m ? Date.UTC(2000 + +m[1], +m[2] - 1, +m[3], +m[4], +m[5]) : null; };
+function parseNotams(text) {
+  const t = text.replace(/\r/g, '').replace(/[|]/g, 'I');
+  const idRe = /\b([A-Z]\d{4}\/\d{2})\b/g;
+  const starts = []; let m;
+  while ((m = idRe.exec(t))) starts.push({ i: m.index, id: m[1] });
+  const blocks = starts.length ? starts.map((s0, k) => ({ id: s0.id, body: t.slice(s0.i, starts[k + 1]?.i ?? t.length) }))
+    : t.split(/(?=\bA\)\s*[A-Z]{4})/).filter((b) => /\bA\)/.test(b)).map((body) => ({ id: '', body }));
+  return blocks.map(({ id, body }) => {
+    const g = (re) => (re.exec(body) || [])[1]?.trim() || '';
+    const b = g(/\bB\)\s*(\d{10})/), c = g(/\bC\)\s*(\d{10}|PERM)/);
+    return {
+      id, a: g(/\bA\)\s*([A-Z]{4}(?:\s+[A-Z]{4})*)/), q: g(/\bQ\)\s*(\S+)/),
+      from: notamTime(b), to: c === 'PERM' ? Infinity : notamTime(c), est: /\bC\)\s*\d{10}\s*EST/.test(body),
+      d: g(/\bD\)\s*([\s\S]*?)(?=\bE\)|$)/).replace(/\s+/g, ' '),
+      e: g(/\bE\)\s*([\s\S]*?)(?=\b[FG]\)|$)/).replace(/\s+/g, ' '),
+    };
+  }).filter((x) => x.a || x.e);
+}
+
+// AIP-Seite: Kandidaten für Frequenzen, Pisten, Maße, PPR, Zeiten
+function parseAip(text) {
+  const t = text.replace(/\r/g, '');
+  const uniq = (a) => [...new Set(a)];
+  const freqs = uniq((t.match(/\b1(?:1[89]|2\d|3[0-6])[.,]\d{2,3}\b/g) || []).map((x) => x.replace(',', '.')));
+  const rwys = uniq((t.match(/\b(0[1-9]|[12]\d|3[0-6])[LRC]?\s*\/\s*(0[1-9]|[12]\d|3[0-6])[LRC]?\b/g) || [])
+    .map((x) => x.replace(/\s+/g, '')).filter((x) => { const [a, b] = x.split('/').map((v) => parseInt(v, 10)); return Math.abs(a - b) === 18; }));
+  const dims = uniq((t.match(/\b\d{3,4}\s*[x×X]\s*\d{2,3}\s*m\b/g) || []).map((x) => x.replace(/\s+/g, ' ')));
+  const ppr = /\bPPR\b/.test(t);
+  const hourLines = t.split('\n').filter((l) => /betriebszeit|öffnungszeit|operating hours|\bHR\b|\bH24\b|SR\s*-\s*SS/i.test(l)).map((l) => l.trim()).slice(0, 6);
+  const times = uniq((t.match(/\b([01]\d|2[0-3])([0-5]\d)\s*[-–]\s*([01]\d|2[0-3])([0-5]\d)\b/g) || []).map((x) => x.replace(/\s/g, '')));
+  return { freqs, rwys, dims, ppr, hourLines, times };
+}
+
+// Ergebnisfenster unter einer Datei
+async function runOcr(btn) {
+  const key = btn.dataset.ocr, fig = btn.closest('.file'), box = fig.parentElement.parentElement.querySelector('.ocr-out') || (() => { const d = document.createElement('div'); d.className = 'ocr-out'; fig.parentElement.after(d); return d; })();
+  box.innerHTML = '<div class="pdf-busy"><div class="spinner"></div><span class="ocr-step">Texterkennung wird geladen … (beim ersten Mal ca. 12 MB)</span></div>';
+  const step = (m) => { const el = box.querySelector('.ocr-step'); if (el && m?.status) el.textContent = `${m.status === 'recognizing text' ? 'Erkenne Text' : 'Lade'} … ${Math.round((m.progress || 0) * 100)} %`; };
+  try {
+    const text = await ocrText(key, step);
+    if (key.startsWith('notam:')) renderNotamOcr(box, text); else renderAipOcr(box, text, key.split(':')[1]);
+  } catch (e) { box.innerHTML = `<p class="bad">${esc(e.message)}</p>`; }
+}
+const rawBlock = (text) => `<details class="ocr-raw"><summary>Erkannten Rohtext anzeigen</summary><pre>${esc(text)}</pre></details>`;
+function renderNotamOcr(box, text) {
+  const list = parseNotams(text), p = plan();
+  const fp = weatherReady() ? (B = F, flightPlan(depMs(p), p)) : null;
+  const a0 = fp?.dep, a1 = fp ? (fp.altLeg ? fp.altLeg.arr : fp.end) : null;
+  const fmtT = (v) => v === Infinity ? 'PERM' : v ? utc(v) : '?';
+  box.innerHTML = `<p class="ocr-note">Automatisch erkannt – <b>mit dem Original vergleichen</b>. ${list.length} NOTAM gefunden.${a0 ? ' „Aktiv zur Flugzeit“ bezieht sich auf ' + hhmm(a0) + '–' + hhmm(a1) + 'Z.' : ''}</p>
+    ${list.map((n, k) => { const active = a0 && n.from && n.from <= a1 && (n.to ?? Infinity) >= a0;
+      return `<label class="ocr-item"><input type="checkbox" class="check" data-n="${k}"${active ? ' checked' : ''}>
+        <span><b>${esc(n.id || 'NOTAM')}</b> · ${esc(n.a || '?')} · ${fmtT(n.from)} – ${fmtT(n.to)}${n.est ? ' EST' : ''} ${active ? '<span class="status warn">aktiv zur Flugzeit</span>' : ''}
+        ${n.d ? `<br><small>Zeiten: ${esc(n.d)}</small>` : ''}<br>${esc(n.e || '(kein E-Text erkannt)')}</span></label>`; }).join('') || '<p class="detail">Keine NOTAM im ICAO-Format erkannt (A) … E)). Bitte Bild schärfer/größer aufnehmen oder Notizen von Hand ergänzen.</p>'}
+    ${list.length ? '<div class="btn-row"><button class="btn-fill" data-take>Ausgewählte in Notizen übernehmen</button></div>' : ''}
+    ${rawBlock(text)}`;
+  box.querySelector('[data-take]')?.addEventListener('click', () => {
+    const sel = [...box.querySelectorAll('[data-n]:checked')].map((c) => list[+c.dataset.n]);
+    const lines = sel.map((n) => `${n.id} ${n.a} ${fmtT(n.from)}–${fmtT(n.to)}: ${n.e}`);
+    const ta = $('notamNotes'); if (!ta) return;
+    ta.value = [ta.value.trim(), ...lines.map((l) => `${l} [aus Bild erkannt]`)].filter(Boolean).join('\n');
+    ta.dispatchEvent(new Event('change'));
+    box.querySelector('.ocr-note').innerHTML = `<b>${sel.length} NOTAM in die Notizen übernommen.</b> Bitte mit dem Original vergleichen.`;
+  });
+}
+function renderAipOcr(box, text, id) {
+  const r = parseAip(text);
+  const chip = (k, v, label = v) => `<label class="ocr-chip"><input type="checkbox" data-k="${k}" value="${esc(v)}"> ${esc(label)}</label>`;
+  box.innerHTML = `<p class="ocr-note">Automatisch erkannt für <b>${esc(id)}</b> – <b>mit dem Original vergleichen</b>. Nur Angekreuztes wird übernommen.</p>
+    <div class="ocr-grid">
+      <div><b>Pisten</b><br>${r.rwys.map((v) => chip('notes', 'Piste ' + v, v)).join('') || '<span class="detail">nichts erkannt</span>'}${r.dims.map((v) => chip('notes', v)).join('')}</div>
+      <div><b>Frequenzen</b><br>${r.freqs.map((v) => chip('notes', v + ' MHz', v)).join('') || '<span class="detail">nichts erkannt</span>'}</div>
+      <div><b>PPR</b><br>${r.ppr ? chip('ppr', '1', '„PPR“ im Text gefunden – PPR einschalten') : '<span class="detail">„PPR“ nicht gefunden</span>'}</div>
+      <div><b>Zeiten</b><br>${r.hourLines.map((l) => `<small class="ocr-line">${esc(l)}</small>`).join('')}${r.times.map((v) => `<label class="ocr-chip"><input type="radio" name="otime" value="${v}"> ${v.slice(0, 2)}:${v.slice(2, 4)}–${v.slice(5, 7)}:${v.slice(7, 9)}</label>`).join('') || '<span class="detail">keine Uhrzeiten erkannt</span>'}
+        ${r.times.length ? '<br><small class="bad">Nur übernehmen, wenn die Zeit laut AIP in UTC angegeben ist (Sommerzeit-Angaben in Klammern beachten).</small>' : ''}</div>
+    </div>
+    <div class="btn-row"><button class="btn-fill" data-take>Ausgewählte übernehmen</button></div>
+    ${rawBlock(text)}`;
+  box.querySelector('[data-take]').addEventListener('click', () => {
+    const notes = [...box.querySelectorAll('[data-k="notes"]:checked')].map((c) => c.value);
+    const ppr = box.querySelector('[data-k="ppr"]:checked');
+    const tm = box.querySelector('[name="otime"]:checked')?.value;
+    const cur = apInfo(id), patch = {};
+    if (notes.length) patch.notes = [cur.notes, `${notes.join(', ')} [aus AIP-Bild erkannt]`].filter(Boolean).join('\n');
+    if (ppr) patch.ppr = true;
+    if (tm) Object.assign(patch, { mode: 'times', open: `${tm.slice(0, 2)}:${tm.slice(2, 4)}`, close: `${tm.slice(5, 7)}:${tm.slice(7, 9)}` });
+    if (!Object.keys(patch).length) return alert('Bitte zuerst etwas ankreuzen.');
+    setApInfo(id, patch);
+    const pb = $('apinfoBox'); if (pb) { wdata().then((W) => { pb.innerHTML = apInfoHTML(); apInfoMount(W); }); }
   });
 }
 
