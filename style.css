@@ -509,6 +509,14 @@ textarea { width: 100%; border: 0; border-radius: 10px; background: var(--fill-s
 .wb-line { stroke: var(--text-2); stroke-width: 2; stroke-dasharray: 5 4; }
 .back { text-decoration: none; }
 
+.pdf-box:empty { display: none; }
+.pdf-box { background: var(--card); border-radius: 18px; padding: 16px 18px; margin-top: 12px; }
+.pdf-busy { display: flex; align-items: center; gap: 14px; color: var(--text-2); }
+.pdf-busy .spinner { margin: 0; }
+.pdf-ok { display: flex; align-items: center; gap: 10px; font-weight: 600; margin: 0; }
+.pdf-ok svg { width: 26px; height: 26px; color: var(--vfr); }
+.row input.full { width: 100%; text-align: left; }
+
 .print-only { display: none; }
 
 /* ---------- PDF / Drucken ---------- */
