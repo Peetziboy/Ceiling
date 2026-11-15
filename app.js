@@ -31,7 +31,7 @@ const DATA = 'data/';  // METAR, TAF, Flugplätze – von GitHub alle 15 min neb
 const OM = 'https://api.open-meteo.com/v1/forecast';     // Modellvorhersage (u. a. DWD ICON)
 const LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600]; // Druckflächen in hPa
 const H = 3600e3, SPAN = 48, FT = 3.28084;
-const DEFAULTS = { minCeil: 1500, minVis: 5, maxWind: 20, maxGust: 25 };
+const DEFAULTS = { minCeil: 1500, minVis: 5, maxWind: 20, maxGust: 25, tempoBad: true };
 const settings = () => ({ ...DEFAULTS, ...store.get('settings', {}), rules: store.get('plan', {}).rules || 'VFR' });
 const AIRCRAFT = {
   C152: { name: 'Cessna C152', tas: 100, burn: 23, fuel: 'AvGas 100LL' },
@@ -267,13 +267,17 @@ function computeHours(ap, start, s) {
     const alt = sunAlt(ap.lat, ap.lon, tm);
     const h = { i, t, taf, mdl, src: taf ? 'TAF' : mdl ? 'Modell' : null, ceil: best?.ceil, vis: best?.vis, wind: w ? wx(w) : null, alt };
     h.cat = best ? category(h.ceil, h.vis) : null;
+    // TEMPO/PROB: schlechtere Kategorie anzeigen (wie metar-taf.com) und gegen die Minima prüfen
+    const tp = taf?.tempo;
+    const tWhy = tp ? [(tp.ceil ?? Infinity) < s.minCeil && 'TEMPO Wolken', (tp.vis ?? 10) < s.minVis && 'TEMPO Sicht', (tp.wgst ?? 0) > s.maxGust && 'TEMPO Böen'].filter(Boolean) : [];
+    if (tp && s.tempoBad !== false) { const ct = category(tp.ceil, tp.vis), R = { LIFR: 0, IFR: 1, MVFR: 2, VFR: 3 }; if (h.cat && R[ct] < R[h.cat]) h.cat = ct; }
     const windBad = (w?.wspd ?? 0) > s.maxWind || (w?.wgst ?? 0) > s.maxGust;
     h.day = alt >= -6; // VFR-Tag: bis Ende der bürgerlichen Dämmerung
     h.why = [(h.ceil ?? Infinity) < s.minCeil && 'Wolken', (h.vis ?? 10) < s.minVis && 'Sicht', windBad && 'Wind',
-      s.rules !== 'IFR' && !h.day && 'Nacht', isOpen(ap, tm) === false && 'geschlossen'].filter(Boolean);
+      s.rules !== 'IFR' && !h.day && 'Nacht', isOpen(ap, tm) === false && 'geschlossen', ...(s.tempoBad !== false ? tWhy : [])].filter(Boolean);
     if (!best) h.status = 'none';
     else if (h.why.length) h.status = 'below';
-    else if (taf?.tempo && ((taf.tempo.ceil ?? Infinity) < s.minCeil || (taf.tempo.vis ?? 10) < s.minVis || (taf.tempo.wgst ?? 0) > s.maxGust)) h.status = 'tempo';
+    else if (tWhy.length) h.status = 'tempo';
     else h.status = 'ok';
     out.push(h);
   }
@@ -364,7 +368,7 @@ async function fetchSet(ids, altId, withProfile) {
 async function loadFlight(ids, altId) {
   loading = 'flug'; route();
   try { F = await fetchSet(ids, altId, true); store.set('briefing', F); } finally { loading = false; }
-  sel = 0; route();
+  sel = Math.max(0, Math.min(SPAN - 1, Math.floor((depMs(plan()) - F.start) / H))); route();
 }
 // Einzelnen Platz laden (Tab „Wetter")
 async function loadWx(id) {
@@ -484,8 +488,9 @@ function chartSVG(ap, hours, s, eta) {
 
 // Zeitleiste der Route: eine Zeile pro Platz, Farbbänder je Kategorie
 function timelineHTML(all, fp) {
-  const cells = (hours, cls, label, ei) => `<div class="tl-row">${runs(hours, (h) => cls(h)).map((r) =>
-    hours.slice(r.a, r.b).map((h, k) => `<button class="tl-c ${cls(h)}${k === 0 ? ' rs' : ''}${k === r.b - r.a - 1 ? ' re' : ''}${ei && ei.has(h.i) ? ' eta' : ''} st-${h.status || 'x'}" data-i="${h.i}" aria-label="${esc(label)} ${utc(h.t)}"></button>`).join('')).join('')}</div>`;
+  const cells = (hours, cls, label, marks = []) => `<div class="tl-row">${runs(hours, (h) => cls(h)).map((r) =>
+    hours.slice(r.a, r.b).map((h, k) => `<button class="tl-c ${cls(h)}${k === 0 ? ' rs' : ''}${k === r.b - r.a - 1 ? ' re' : ''} st-${h.status || 'x'}" data-i="${h.i}" aria-label="${esc(label)} ${utc(h.t)}"></button>`).join('')).join('')}${marks
+    .filter((m) => m.t >= B.start && m.t <= B.start + SPAN * H).map((m) => `<span class="tl-mark" style="left:${(((m.t - B.start) / (SPAN * H)) * 100).toFixed(2)}%">${m.lab}</span>`).join('')}</div>`;
   let head = '<div class="tl-name"></div><div class="tl-row tl-head">';
   for (let i = 0; i < SPAN; i++) {
     const t = B.start + i * H, hz = new Date(t).getUTCHours();
@@ -500,7 +505,7 @@ function timelineHTML(all, fp) {
   const rows = fp ? fp.points.filter((pt) => byId[pt.id]).map((pt) => ({ ...byId[pt.id], pt })) : all.map((x) => ({ ...x, pt: null }));
   const SHORT = { Abflug: 'ETD', Zwischenlandung: 'ETA', Ankunft: 'ETA', Ausweich: 'Ausw.' };
   return `<div class="timeline">${head}${lr}${rows.map(({ ap, hours, pt }) =>
-    `<div class="tl-name">${esc(ap.id)}${pt ? `<small>${SHORT[pt.kind]} ${hhmm(pt.t)}Z</small>` : ''}</div>${cells(hours, (h) => 'cat-' + (h.cat || 'none'), ap.id, new Set(ptMarks(pt ? [pt] : []).map((m) => hourOf(m.t)).filter((v) => v != null)))}`).join('')}</div>`;
+    `<div class="tl-name">${esc(ap.id)}${pt ? `<small>${SHORT[pt.kind]} ${hhmm(pt.t)}Z</small>` : ''}</div>${cells(hours, (h) => 'cat-' + (h.cat || 'none'), ap.id, ptMarks(pt ? [pt] : []))}`).join('')}<div class="tl-selbar noprint" style="--s:${sel}"></div></div>`;
 }
 
 // Zeitfenster, in denen alle Plätze über den Minima liegen und Tag ist
@@ -943,7 +948,7 @@ function mountTimeControls(all) {
     document.querySelectorAll('[data-sel]').forEach((r) => {
       const svg = r.ownerSVGElement; r.setAttribute('x', +svg.dataset.l + (sel / SPAN) * +svg.dataset.pw);
     });
-    document.querySelectorAll('.tl-c').forEach((c) => c.classList.toggle('sel', +c.dataset.i === sel));
+    document.querySelectorAll('.tl-selbar').forEach((el) => el.style.setProperty('--s', sel));
   };
   slider.addEventListener('input', (e) => setSel(+e.target.value));
   document.querySelectorAll('.tl-c').forEach((c) => c.addEventListener('click', () => setSel(+c.dataset.i)));
@@ -1693,7 +1698,7 @@ function m2View() {
   <h2 class="sec">48 Stunden</h2>
   <div class="card">${ok.length ? timelineHTML(ok, fp) : ''}
     <div class="legend"><span><i class="cat-VFR"></i>VFR</span><span><i class="cat-MVFR"></i>MVFR</span><span><i class="cat-IFR"></i>IFR</span><span><i class="cat-LIFR"></i>LIFR</span>
-    <span><i class="lg-below"></i>nicht fliegbar</span><span><i class="lg-tempo2"></i>TEMPO unter Minima</span><span>● = deine Zeit am Platz</span></div>
+    <span><i class="lg-below"></i>nicht fliegbar</span><span><i class="lg-tempo2"></i>TEMPO unter Minima</span><span><i class="lg-mark">ETA</i>deine Zeit am Platz</span><span><i class="lg-sel"></i>gewählte Stunde</span></div>
   </div>
   <div class="card pick">
     <input type="range" id="slider" min="0" max="${SPAN - 1}" step="1" value="${sel}" aria-label="Stunde wählen">
@@ -2253,7 +2258,8 @@ const SECTIONS = [
       return `
       <p class="group-label">Persönliche Minima</p>
       <ul class="group">${num('minCeil', 'Wolkenuntergrenze', 'ft', 100)}${num('minVis', 'Sicht', 'km', 0.5)}${num('maxWind', 'Wind max.', 'kt', 1)}${num('maxGust', 'Böen max.', 'kt', 1)}</ul>
-      <p class="group-note">Zeiten unter diesen Werten werden rot markiert und zählen nicht als mögliche Abflugzeit.</p>
+      <ul class="group gap"><li><label class="row"><span>TEMPO/PROB unter Minima = nicht fliegbar</span><input type="checkbox" class="switch" data-k="tempoBad"${s.tempoBad !== false ? ' checked' : ''}></label></li></ul>
+      <p class="group-note">Zeiten unter diesen Werten werden rot markiert und zählen nicht als mögliche Abflugzeit. Grenzwerte gelten einschließlich: Böen max. 25 kt heißt, 25 kt sind noch erlaubt, 26 kt nicht. Mit TEMPO/PROB eingeschaltet zählen auch zeitweise oder wahrscheinliche Verschlechterungen als nicht fliegbar, die Kategorie zeigt dann den schlechteren Wert.</p>
 
       <p class="group-label">Eigene Flugplätze</p>
       <ul class="group">${Object.entries(coords).map(([id, c]) => `<li><div class="row"><span>${esc(id)} <span class="detail">${esc(c.name || '')} ${(+c.lat).toFixed(3)}, ${(+c.lon).toFixed(3)}</span></span><button class="btn-text danger-text" data-del="${esc(id)}">Löschen</button></div></li>`).join('')}
@@ -2271,7 +2277,7 @@ const SECTIONS = [
     mount: () => {
       document.querySelectorAll('[data-k]').forEach((inp) => inp.addEventListener('change', () => {
         const s = store.get('settings', {});
-        s[inp.dataset.k] = inp.type === 'number' ? Math.max(0, parseFloat(inp.value) || 0) : inp.value.trim();
+        s[inp.dataset.k] = inp.type === 'checkbox' ? inp.checked : inp.type === 'number' ? Math.max(0, parseFloat(inp.value) || 0) : inp.value.trim();
         store.set('settings', s);
       }));
       document.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
